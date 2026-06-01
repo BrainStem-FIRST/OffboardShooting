@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
-import { VideoData, TrajectoryPoint, Meterstick, SimulationParams, GeneratedTrajectory, TrajGenParams } from './types';
+import { VideoData, TrajectoryPoint, Meterstick, SimulationParams, GeneratedTrajectory, TrajGenParams, TrajGroup } from './types';
 import VideoSidebar from './components/VideoSidebar';
 import VideoDisplay from './components/VideoDisplay';
 import SimulationControls from './components/SimulationControls';
@@ -36,6 +36,9 @@ function makeDefaultVideo(id: string, name: string, url: string): VideoData {
 const DEFAULT_TRAJGEN_PARAMS: TrajGenParams = {
   dx: 3,
   dy: 1.8,
+  dxMin: 1,
+  dxMax: 5,
+  dxStep: 1,
   goalWidth: 0.4,
   exitAngleMin: 40,
   exitAngleMax: 75,
@@ -78,13 +81,11 @@ export default function App() {
 
   // Trajectory generation state
   const [trajGenParams, setTrajGenParams] = useState<TrajGenParams>(DEFAULT_TRAJGEN_PARAMS);
-  const [generatedTrajectories, setGeneratedTrajectories] = useState<GeneratedTrajectory[]>([]);
+  const [trajGroups, setTrajGroups] = useState<TrajGroup[]>([]);
+  const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
   const [selectedTrajId, setSelectedTrajId] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
   const [hoveredTrajId, setHoveredTrajId] = useState<string | null>(null);
-  // Physics params frozen at generation time — changing the left panel inputs does not affect already-generated trajectories
-  const [frozenDrag, setFrozenDrag] = useState(DEFAULT_TRAJGEN_PARAMS.dragCoefficient);
-  const [frozenMagnus, setFrozenMagnus] = useState(DEFAULT_TRAJGEN_PARAMS.magnusGain);
 
   // Panel sizing
   const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT);
@@ -122,6 +123,7 @@ export default function App() {
   }, []);
 
   const selectedVideo = videos.find((v) => v.id === selectedId) ?? null;
+  const selectedGroup = trajGroups.find(g => g.id === selectedGroupId) ?? trajGroups[0] ?? null;
 
   function updateVideo(id: string, patch: Partial<VideoData>) {
     setVideos((prev) => prev.map((v) => (v.id === id ? { ...v, ...patch } : v)));
@@ -209,21 +211,50 @@ export default function App() {
   function handleGenerate() {
     const drag = trajGenParams.dragCoefficient;
     const magnus = trajGenParams.magnusGain;
+    const dy = trajGenParams.dy;
     setGenerating(true);
     setTimeout(() => {
-      const results = generateTrajectories(trajGenParams, drag, magnus);
-      setGeneratedTrajectories(results);
-      setSelectedTrajId(results.length > 0 ? results[0].id : null);
-      setFrozenDrag(drag);
-      setFrozenMagnus(magnus);
+      const newGroups: TrajGroup[] = [];
+      // Enumerate all dx values in [dxMin, dxMax] by dxStep
+      let dx = trajGenParams.dxMin;
+      while (dx <= trajGenParams.dxMax + 1e-9) {
+        const roundedDx = Math.round(dx * 1e6) / 1e6;
+        const paramsForDx = { ...trajGenParams, dx: roundedDx };
+        const results = generateTrajectories(paramsForDx, drag, magnus);
+        const groupId = `${roundedDx.toFixed(6)}-${dy.toFixed(6)}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        newGroups.push({ id: groupId, dx: roundedDx, dy, drag, magnus, trajectories: results });
+        dx = Math.round((dx + trajGenParams.dxStep) * 1e6) / 1e6;
+      }
+      setTrajGroups(prev => {
+        const next = [...prev, ...newGroups];
+        return next;
+      });
+      if (newGroups.length > 0) {
+        setSelectedGroupId(newGroups[0].id);
+        setSelectedTrajId(newGroups[0].trajectories.length > 0 ? newGroups[0].trajectories[0].id : null);
+      }
       setGenerating(false);
     }, 0);
   }
 
-  function handleDeleteTraj(id: string) {
-    setGeneratedTrajectories(prev => {
-      const next = prev.filter(t => t.id !== id);
-      if (selectedTrajId === id) setSelectedTrajId(next.length > 0 ? next[0].id : null);
+  function handleDeleteTraj(groupId: string, trajId: string) {
+    setTrajGroups(prev => prev.map(g => {
+      if (g.id !== groupId) return g;
+      const next = g.trajectories.filter(t => t.id !== trajId);
+      if (selectedTrajId === trajId) setSelectedTrajId(next.length > 0 ? next[0].id : null);
+      return { ...g, trajectories: next };
+    }));
+  }
+
+  function handleDeleteGroup(groupId: string) {
+    setTrajGroups(prev => {
+      const next = prev.filter(g => g.id !== groupId);
+      if (selectedGroupId === groupId) {
+        const newSel = next.length > 0 ? next[next.length - 1].id : null;
+        setSelectedGroupId(newSel);
+        const newGroup = next.find(g => g.id === newSel);
+        setSelectedTrajId(newGroup && newGroup.trajectories.length > 0 ? newGroup.trajectories[0].id : null);
+      }
       return next;
     });
   }
@@ -411,11 +442,10 @@ export default function App() {
             <main className="flex flex-1 min-w-0 min-h-0 bg-gray-950">
               <TrajectoryGenCanvas
                 params={trajGenParams}
-                trajectories={generatedTrajectories}
+                groups={trajGroups}
+                selectedGroupId={selectedGroup?.id ?? null}
                 selectedId={selectedTrajId}
                 hoveredId={hoveredTrajId}
-                drag={frozenDrag}
-                magnus={frozenMagnus}
               />
             </main>
 
@@ -444,23 +474,28 @@ export default function App() {
               style={{ width: rightOpen ? rightWidth : 0 }}
             >
               <TrajectoryGenRight
-                trajectories={generatedTrajectories}
-                selectedId={selectedTrajId}
-                hoveredId={hoveredTrajId}
-                onSelect={setSelectedTrajId}
-                onHover={setHoveredTrajId}
-                onDelete={handleDeleteTraj}
-                onUpdate={(trajs) => { setGeneratedTrajectories(trajs); }}
-                onImport={({ drag, magnus, dx, dy, trajectories }) => {
-                  setFrozenDrag(drag);
-                  setFrozenMagnus(magnus);
-                  setTrajGenParams(p => ({ ...p, dx, dy, dragCoefficient: drag, magnusGain: magnus }));
-                  setGeneratedTrajectories(trajectories);
-                  setSelectedTrajId(trajectories.length > 0 ? trajectories[0].id : null);
+                groups={trajGroups}
+                selectedGroupId={selectedGroup?.id ?? null}
+                selectedTrajId={selectedTrajId}
+                hoveredTrajId={hoveredTrajId}
+                onSelectGroup={(id) => {
+                  setSelectedGroupId(id);
+                  const g = trajGroups.find(g => g.id === id);
+                  setSelectedTrajId(g && g.trajectories.length > 0 ? g.trajectories[0].id : null);
+                }}
+                onSelectTraj={setSelectedTrajId}
+                onHoverTraj={setHoveredTrajId}
+                onDeleteTraj={handleDeleteTraj}
+                onDeleteGroup={handleDeleteGroup}
+                onUpdateGroup={(groupId, trajs) => {
+                  setTrajGroups(prev => prev.map(g => g.id === groupId ? { ...g, trajectories: trajs } : g));
+                }}
+                onImportGroup={(group) => {
+                  setTrajGroups(prev => [...prev, group]);
+                  setSelectedGroupId(group.id);
+                  setSelectedTrajId(group.trajectories.length > 0 ? group.trajectories[0].id : null);
                 }}
                 params={trajGenParams}
-                drag={frozenDrag}
-                magnus={frozenMagnus}
                 width={rightWidth}
               />
             </div>

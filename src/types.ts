@@ -40,11 +40,25 @@ export interface GeneratedTrajectory {
   landingX: number; // meters from robot (should be dx)
   successfulBracket?: boolean; // set after refine; undefined = not yet refined
   accurate?: boolean;          // landing error < refineThreshold; undefined = not yet refined
+  landingError?: number | null; // mm error after refine, null = not yet refined
+}
+
+// A group of trajectories all targeting the same (dx, dy)
+export interface TrajGroup {
+  id: string;      // unique per group, e.g. `${dx}-${dy}-${timestamp}`
+  dx: number;
+  dy: number;
+  drag: number;
+  magnus: number;
+  trajectories: GeneratedTrajectory[];
 }
 
 export interface TrajGenParams {
-  dx: number; // meters, horizontal distance to goal
+  dx: number; // meters, horizontal distance to goal (used as single value when range not set)
   dy: number; // meters, vertical offset (positive = goal above robot)
+  dxMin: number; // range slider min
+  dxMax: number; // range slider max
+  dxStep: number; // step between distances
   goalWidth: number; // meters
   exitAngleMin: number;
   exitAngleMax: number;

@@ -197,12 +197,18 @@ function NumInput({ label, unit, value, step, min, max, onChange }: {
 }
 
 export default function TrajectoryGenLeft({ params, onChange, onGenerate, generating, width }: Props) {
-  const [collapsed, setCollapsed] = useState({ scene: false, angle: false, velocity: false, steps: false });
-  function toggle(k: keyof typeof collapsed) {
-    setCollapsed(prev => ({ ...prev, [k]: !prev[k] }));
-  }
   function set<K extends keyof TrajGenParams>(key: K, val: TrajGenParams[K]) {
     onChange({ ...params, [key]: val });
+  }
+
+  // Compute distance values that will be generated
+  const dxValues: number[] = [];
+  {
+    let dx = params.dxMin;
+    while (dx <= params.dxMax + 1e-9) {
+      dxValues.push(Math.round(dx * 1e6) / 1e6);
+      dx = Math.round((dx + params.dxStep) * 1e6) / 1e6;
+    }
   }
 
   return (
@@ -212,8 +218,24 @@ export default function TrajectoryGenLeft({ params, onChange, onGenerate, genera
 
         {/* Scene Setup */}
         <div className="space-y-3">
-          <NumInput label="Distance to Goal (dx)" unit="m" value={params.dx} step={0.1} min={0.1}
-            onChange={(v) => set('dx', Math.max(0.1, v))} />
+          {/* Distance to goal range slider */}
+          <RangeRow
+            label="Distance to Goal"
+            unit="m"
+            min={0} max={30} step={0.1}
+            valMin={params.dxMin} valMax={params.dxMax}
+            onChangeMin={(v) => onChange({ ...params, dxMin: v })}
+            onChangeMax={(v) => onChange({ ...params, dxMax: v })}
+          />
+          <NumInput label="Distance Step" unit="m" value={params.dxStep} step={0.1} min={0.1}
+            onChange={(v) => onChange({ ...params, dxStep: Math.max(0.1, v) })} />
+          {dxValues.length > 0 && (
+            <p className="text-xs text-gray-600">
+              {dxValues.length === 1
+                ? `1 distance: ${dxValues[0].toFixed(2)} m`
+                : `${dxValues.length} distances: ${dxValues[0].toFixed(2)} → ${dxValues[dxValues.length - 1].toFixed(2)} m`}
+            </p>
+          )}
           <NumInput label="Height Offset (dy)" unit="m" value={params.dy} step={0.1}
             onChange={(v) => set('dy', v)} />
           <NumInput label="Goal Width" unit="m" value={params.goalWidth} step={0.05} min={0.05}
@@ -284,7 +306,7 @@ export default function TrajectoryGenLeft({ params, onChange, onGenerate, genera
         {/* Estimated count hint */}
         <p className="text-xs text-gray-600 text-center">
           {Math.round((params.exitAngleMax - params.exitAngleMin) / params.angleStep + 1) *
-           Math.round((params.velocityMax - params.velocityMin) / params.velocityStep + 1)} combinations to test
+           Math.round((params.velocityMax - params.velocityMin) / params.velocityStep + 1)} combinations × {dxValues.length} distance{dxValues.length !== 1 ? 's' : ''}
         </p>
       </div>
     </aside>
