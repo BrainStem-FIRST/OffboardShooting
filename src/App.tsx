@@ -7,7 +7,7 @@ import SimulationControls from './components/SimulationControls';
 import TrajectoryGenCanvas from './components/TrajectoryGenCanvas';
 import TrajectoryGenLeft from './components/TrajectoryGenLeft';
 import TrajectoryGenRight from './components/TrajectoryGenRight';
-import { generateTrajectories } from './simulation';
+import { generateTrajectories, refineGroupTrajectories } from './simulation';
 
 const LEFT_MIN = 160;
 const LEFT_MAX = 480;
@@ -30,6 +30,7 @@ function makeDefaultVideo(id: string, name: string, url: string): VideoData {
     showSimulation: false,
     currentFrame: 0,
     hasExitPos: false,
+    framerate: 30,
   };
 }
 
@@ -40,8 +41,8 @@ const DEFAULT_TRAJGEN_PARAMS: TrajGenParams = {
   dxMax: 5,
   dxStep: 1,
   goalWidth: 0.4,
-  exitAngleMin: 40,
-  exitAngleMax: 75,
+  exitAngleMin: 30,
+  exitAngleMax: 85,
   angleStep: 1,
   impactAngleMin: 0,
   impactAngleMax: 90,
@@ -186,6 +187,15 @@ export default function App() {
     [selectedId]
   );
 
+  const handleFramerateChange = useCallback(
+    (framerate: number) => {
+      if (!selectedId) return;
+      updateVideo(selectedId, { framerate });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selectedId]
+  );
+
   const handleToggleSimulation = useCallback(() => {
     if (!selectedId) return;
     setVideos((prev) =>
@@ -222,7 +232,15 @@ export default function App() {
         const paramsForDx = { ...trajGenParams, dx: roundedDx };
         const results = generateTrajectories(paramsForDx, drag, magnus);
         const groupId = `${roundedDx.toFixed(6)}-${dy.toFixed(6)}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        newGroups.push({ id: groupId, dx: roundedDx, dy, drag, magnus, trajectories: results });
+        const group: TrajGroup = { id: groupId, dx: roundedDx, dy, drag, magnus, trajectories: results };
+        const refined = refineGroupTrajectories(
+          group,
+          paramsForDx,
+          trajGenParams.refineMaxIter,
+          trajGenParams.refineThreshold,
+          'angle'
+        );
+        newGroups.push({ ...group, trajectories: refined });
         dx = Math.round((dx + trajGenParams.dxStep) * 1e6) / 1e6;
       }
       setTrajGroups(prev => {
@@ -235,6 +253,14 @@ export default function App() {
       }
       setGenerating(false);
     }, 0);
+  }
+
+  function handleBatchUpdateGroups(updates: { groupId: string; trajectories: GeneratedTrajectory[] }[]) {
+    if (updates.length === 0) return;
+    const byId = new Map(updates.map((u) => [u.groupId, u.trajectories]));
+    setTrajGroups((prev) =>
+      prev.map((g) => (byId.has(g.id) ? { ...g, trajectories: byId.get(g.id)! } : g))
+    );
   }
 
   function handleDeleteTraj(groupId: string, trajId: string) {
@@ -393,7 +419,9 @@ export default function App() {
                   showSimulation={selectedVideo.showSimulation}
                   trajectory={selectedVideo.trajectory}
                   meterstick={selectedVideo.meterstick}
+                  framerate={selectedVideo.framerate}
                   onChange={handleSimParamsChange}
+                  onFramerateChange={handleFramerateChange}
                   onToggleShow={handleToggleSimulation}
                   pickingExitPos={pickingExitPos}
                   onStartPickExitPos={() => setPickingExitPos((v) => !v)}
@@ -490,6 +518,7 @@ export default function App() {
                 onUpdateGroup={(groupId, trajs) => {
                   setTrajGroups(prev => prev.map(g => g.id === groupId ? { ...g, trajectories: trajs } : g));
                 }}
+                onBatchUpdateGroups={handleBatchUpdateGroups}
                 onImportGroup={(group) => {
                   setTrajGroups(prev => [...prev, group]);
                   setSelectedGroupId(group.id);

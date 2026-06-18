@@ -1,7 +1,7 @@
-import { useRef, useState, useEffect } from 'react';
+import { useRef, useState, useEffect, useMemo } from 'react';
 import { Eye, EyeOff, Crosshair, Target, Zap, X } from 'lucide-react';
 import { SimulationParams, TrajectoryPoint, Meterstick } from '../types';
-import { fitTrajectoryAsync } from '../simulation';
+import { fitDragMagnusAsync, speedBetweenPoints } from '../simulation';
 
 interface Props {
   params: SimulationParams;
@@ -9,12 +9,16 @@ interface Props {
   showSimulation: boolean;
   trajectory: TrajectoryPoint[];
   meterstick: Meterstick;
+  framerate: number;
   onChange: (p: SimulationParams) => void;
+  onFramerateChange: (fps: number) => void;
   onToggleShow: () => void;
   pickingExitPos: boolean;
   onStartPickExitPos: () => void;
   width: number;
 }
+
+type PanelTab = 'empirical' | 'simulation';
 
 interface SliderRowProps {
   label: string;
@@ -24,6 +28,36 @@ interface SliderRowProps {
   max: number;
   step: number;
   onChange: (v: number) => void;
+}
+
+function FramerateInput({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+  const [raw, setRaw] = useState(String(value));
+  const [focused, setFocused] = useState(false);
+
+  useEffect(() => {
+    if (!focused) setRaw(String(value));
+  }, [value, focused]);
+
+  function commit(str: string) {
+    const stripped = str.replace(/[^0-9.\-]/g, '');
+    let n = parseFloat(stripped);
+    if (isNaN(n) || n <= 0) n = value > 0 ? value : 30;
+    setRaw(String(n));
+    onChange(n);
+  }
+
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      value={raw}
+      onChange={(e) => setRaw(e.target.value)}
+      onFocus={() => setFocused(true)}
+      onBlur={(e) => { setFocused(false); commit(e.target.value); }}
+      onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+      className="w-full text-xs bg-gray-800 border border-gray-600 rounded-md px-2 py-1.5 text-white focus:outline-none focus:border-blue-500"
+    />
+  );
 }
 
 function IntInput({ label, value, onChange }: { label: string; value: number; onChange: (v: number) => void }) {
@@ -112,12 +146,15 @@ export default function SimulationControls({
   showSimulation,
   trajectory,
   meterstick,
+  framerate,
   onChange,
+  onFramerateChange,
   onToggleShow,
   pickingExitPos,
   onStartPickExitPos,
   width,
 }: Props) {
+  const [panelTab, setPanelTab] = useState<PanelTab>('empirical');
   const [fitStatus, setFitStatus] = useState<'idle' | 'running' | 'ok' | 'fail'>('idle');
   const [fitRmse, setFitRmse] = useState<number | null>(null);
   const [fitProgress, setFitProgress] = useState(0);
@@ -127,7 +164,12 @@ export default function SimulationControls({
     onChange({ ...params, [key]: val });
   }
 
-  const canFit = trajectory.length >= 3 && hasExitPos && meterstick.length > 0;
+  const canFit =
+    trajectory.length >= 3 &&
+    hasExitPos &&
+    meterstick.length > 0 &&
+    framerate > 0 &&
+    params.exitVelocity > 0;
 
   async function handleFit() {
     if (!canFit) return;
@@ -137,11 +179,14 @@ export default function SimulationControls({
     setFitProgress(0);
     setFitRmse(null);
 
-    const result = await fitTrajectoryAsync(
+    const result = await fitDragMagnusAsync(
       trajectory,
       params.exitX,
       params.exitY,
       meterstick.length,
+      framerate,
+      params.exitVelocity,
+      params.exitAngle,
       (p) => setFitProgress(p),
       signal
     );
@@ -154,8 +199,6 @@ export default function SimulationControls({
     }
     onChange({
       ...params,
-      exitVelocity: result.exitVelocity,
-      exitAngle: result.exitAngle,
       dragCoefficient: result.dragCoefficient,
       magnusGain: result.magnusGain,
     });
@@ -170,8 +213,101 @@ export default function SimulationControls({
     setFitProgress(0);
   }
 
+  const dt = framerate > 0 ? 1 / framerate : null;
+
+  const sortedTrajectory = useMemo(
+    () => [...trajectory].sort((a, b) => a.frame - b.frame),
+    [trajectory]
+  );
+
+  const exitSpeed = useMemo(() => {
+    if (sortedTrajectory.length < 2) return null;
+    return speedBetweenPoints(sortedTrajectory[0], sortedTrajectory[1], meterstick.length, framerate);
+  }, [sortedTrajectory, meterstick.length, framerate]);
+
+  const panelTabs: { id: PanelTab; label: string }[] = [
+    { id: 'empirical', label: 'Empirical Testing' },
+    { id: 'simulation', label: 'Simulation' },
+  ];
+
   return (
-    <aside className="flex flex-col bg-gray-900 border-l border-gray-700 p-4 space-y-5 overflow-y-auto h-full" style={{ width }}>
+    <aside className="flex flex-col bg-gray-900 border-l border-gray-700 h-full overflow-hidden" style={{ width }}>
+      {/* Panel tabs */}
+      <div className="flex-shrink-0 flex border-b border-gray-700">
+        {panelTabs.map((t) => (
+          <button
+            key={t.id}
+            onClick={() => setPanelTab(t.id)}
+            className={`flex-1 px-2 py-2.5 text-xs font-medium transition-colors border-b-2 -mb-px ${
+              panelTab === t.id
+                ? 'border-blue-500 text-blue-400 bg-gray-900'
+                : 'border-transparent text-gray-500 hover:text-gray-300 hover:bg-gray-800/50'
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-4 space-y-5">
+      {panelTab === 'empirical' && (
+        <div className="space-y-5">
+          <div>
+            <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-widest mb-4">
+              Empirical Testing
+            </h2>
+            <p className="text-xs text-gray-500 leading-relaxed mb-4">
+              Set the video framerate and calibrate the yellow meterstick on the video.
+              Exit speed is estimated from the first two plotted trajectory points.
+            </p>
+          </div>
+
+          <div>
+            <label className="text-xs text-gray-500 block mb-1">Framerate (fps)</label>
+            <FramerateInput value={framerate} onChange={onFramerateChange} />
+          </div>
+
+          <div>
+            <label className="text-xs text-gray-500 block mb-1">dt (s)</label>
+            <div className="w-full text-xs bg-gray-800/60 border border-gray-700 rounded-md px-2 py-1.5 text-gray-300 font-mono tabular-nums">
+              {dt !== null ? dt.toFixed(6) : '—'}
+            </div>
+            <p className="text-xs text-gray-600 mt-1">dt = 1 / framerate</p>
+          </div>
+
+          <div className="pt-2 border-t border-gray-700">
+            <label className="text-xs text-gray-500 block mb-1">Calculated Exit Speed</label>
+            <div className="flex items-baseline gap-2">
+              <span className="text-2xl font-mono font-semibold tabular-nums text-white">
+                {exitSpeed !== null ? exitSpeed.toFixed(2) : '—'}
+              </span>
+              {exitSpeed !== null && (
+                <span className="text-xs text-gray-500">m/s</span>
+              )}
+            </div>
+            {exitSpeed === null && (
+              <p className="text-xs text-gray-600 mt-2 leading-snug">
+                {trajectory.length < 2
+                  ? 'Plot at least 2 trajectory points on consecutive frames.'
+                  : meterstick.length <= 0
+                  ? 'Drag the meterstick on the video to set the 1 m scale.'
+                  : framerate <= 0
+                  ? 'Enter a valid framerate.'
+                  : 'Could not compute — check that the first two points are on different frames.'}
+              </p>
+            )}
+            {exitSpeed !== null && sortedTrajectory.length >= 2 && (
+              <p className="text-xs text-gray-600 mt-2 leading-snug">
+                From frames {sortedTrajectory[0].frame + 1} → {sortedTrajectory[1].frame + 1}
+                {' '}({((sortedTrajectory[1].frame - sortedTrajectory[0].frame) / framerate * 1000).toFixed(1)} ms)
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {panelTab === 'simulation' && (
+      <>
       <div>
         <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-widest mb-4">
           Simulation
@@ -272,7 +408,13 @@ export default function SimulationControls({
             <p className="text-xs text-gray-600 text-center leading-snug">
               {trajectory.length < 3
                 ? `Need ${3 - trajectory.length} more plotted point${3 - trajectory.length === 1 ? '' : 's'}`
-                : 'Set a launch point first'}
+                : !hasExitPos
+                ? 'Set a launch point first'
+                : meterstick.length <= 0
+                ? 'Calibrate the meterstick scale first'
+                : framerate <= 0
+                ? 'Set a valid framerate first'
+                : 'Set the exit velocity (m/s) first'}
             </p>
           )}
           {fitStatus === 'ok' && fitRmse !== null && (
@@ -330,6 +472,9 @@ export default function SimulationControls({
         <p className="text-xs text-gray-500 leading-relaxed">
           Drag the yellow meterstick on the video to calibrate the 1-meter scale.
         </p>
+      </div>
+      </>
+      )}
       </div>
     </aside>
   );

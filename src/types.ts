@@ -29,6 +29,7 @@ export interface VideoData {
   showSimulation: boolean;
   currentFrame: number;
   hasExitPos: boolean;
+  framerate: number; // video fps for empirical velocity calculations
 }
 
 export interface GeneratedTrajectory {

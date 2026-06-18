@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { GeneratedTrajectory, TrajGroup, TrajGenParams } from '../types';
 import { Trash2, Download, Upload, Plus, RefreshCw, Copy, ChevronUp, ChevronDown, XCircle, X } from 'lucide-react';
-import { simulateLanding, simulateImpactAngle, simulatePeakHeight, refineTrajectory } from '../simulation';
+import { simulateLanding, simulateImpactAngle, refineTrajectory, refineGroupTrajectories, exportTrajectoriesToFolder } from '../simulation';
 
 interface Props {
   groups: TrajGroup[];
@@ -14,6 +14,7 @@ interface Props {
   onDeleteTraj: (groupId: string, trajId: string) => void;
   onDeleteGroup: (groupId: string) => void;
   onUpdateGroup: (groupId: string, trajs: GeneratedTrajectory[]) => void;
+  onBatchUpdateGroups: (updates: { groupId: string; trajectories: GeneratedTrajectory[] }[]) => void;
   onImportGroup: (group: TrajGroup) => void;
   params: TrajGenParams;
   width: number;
@@ -60,7 +61,7 @@ function FreeNumInput({ value, min, max, onChange, className }: {
 export default function TrajectoryGenRight({
   groups, selectedGroupId, selectedTrajId, hoveredTrajId,
   onSelectGroup, onSelectTraj, onHoverTraj,
-  onDeleteTraj, onDeleteGroup, onUpdateGroup, onImportGroup,
+  onDeleteTraj, onDeleteGroup, onUpdateGroup, onBatchUpdateGroups, onImportGroup,
   params, width
 }: Props) {
   const group = groups.find(g => g.id === selectedGroupId) ?? groups[0] ?? null;
@@ -70,7 +71,7 @@ export default function TrajectoryGenRight({
 
   const [refineMaxIter, setRefineMaxIter] = useState(200);
   const [refineThreshold, setRefineThreshold] = useState(0.001);
-  const [constMode, setConstMode] = useState<ConstMode>('velocity');
+  const [constMode, setConstMode] = useState<ConstMode>('angle');
   const [refining, setRefining] = useState(false);
   const [manualVel, setManualVel] = useState(8);
   const [manualAngle, setManualAngle] = useState(45);
@@ -88,6 +89,9 @@ export default function TrajectoryGenRight({
   const committingRef = useRef(false);
   const importInputRef = useRef<HTMLInputElement>(null);
   const [importError, setImportError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportMessage, setExportMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  const exportingRef = useRef(false);
 
   useEffect(() => { activeCellRef.current = activeCell; }, [activeCell]);
   useEffect(() => { cellRawRef.current = cellRaw; }, [cellRaw]);
@@ -234,30 +238,21 @@ export default function TrajectoryGenRight({
   });
 
   function handleRefine() {
-    if (!group) return;
+    const groupsWithTrajs = groups.filter((g) => g.trajectories.length > 0);
+    if (groupsWithTrajs.length === 0) return;
     setRefining(true);
     setTimeout(() => {
-      const gParams = { ...params, dx: group.dx, dy: group.dy };
-      const results = trajectories.map(t =>
-        refineTrajectory(t, gParams, drag, magnus, refineMaxIter, refineThreshold, constMode)
-      );
-      const withValidity = results.map(r => {
-        const t = r.trajectory;
-        const impact = simulateImpactAngle(t.exitVelocity, t.exitAngle, drag, magnus, group.dx);
-        const withImpact = { ...t, impactAngle: impact !== null ? Math.round(impact * 100) / 100 : t.impactAngle };
-        if (!r.successfulBracket) return withImpact;
-        const landing = simulateLanding(t.exitVelocity, t.exitAngle, drag, magnus, group.dx, group.dy);
-        const inGoal = landing !== null && Math.abs(landing.landingY - group.dy) <= params.goalWidth / 2;
-        return { ...withImpact, successfulBracket: inGoal, accurate: r.accurate };
-      });
-      const VEL_TOL = 0.05;
-      const ANG_TOL = 0.25;
-      const deduped = withValidity.filter((t, i) =>
-        !withValidity.slice(0, i).some(
-          other => Math.abs(other.exitVelocity - t.exitVelocity) <= VEL_TOL && Math.abs(other.exitAngle - t.exitAngle) <= ANG_TOL
-        )
-      );
-      onUpdateGroup(group.id, deduped);
+      const updates = groupsWithTrajs.map((g) => ({
+        groupId: g.id,
+        trajectories: refineGroupTrajectories(
+          g,
+          params,
+          refineMaxIter,
+          refineThreshold,
+          constMode
+        ),
+      }));
+      onBatchUpdateGroups(updates);
       setRefining(false);
     }, 0);
   }
@@ -310,28 +305,31 @@ export default function TrajectoryGenRight({
     onUpdateGroup(group.id, trajectories.map(tr => tr.id === id ? refined : tr));
   }
 
-  function handleDownload() {
-    if (!group) return;
-    const payload = {
-      dx: group.dx,
-      dy: group.dy,
-      dragCoeff: group.drag,
-      magnusCoeff: group.magnus,
-      trajectories: trajectories.map(t => ({
-        exitAngle: t.exitAngle,
-        impactAngle: t.impactAngle,
-        speed: t.exitVelocity,
-        timeOfFlight: t.timeOfFlight,
-        peakHeight: Math.round(simulatePeakHeight(t.exitVelocity, t.exitAngle, group.drag, group.magnus) * 1000) / 1000,
-      })),
-    };
-    const blob = new Blob([JSON.stringify(payload, null, 4)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${downloadName || 'trajectories'} (${group.dx.toFixed(3)}, ${group.dy.toFixed(3)}).json`;
-    a.click();
-    URL.revokeObjectURL(url);
+  async function handleDownload() {
+    if (exportingRef.current) return;
+    exportingRef.current = true;
+    setExporting(true);
+    setExportMessage(null);
+
+    try {
+      const result = await exportTrajectoriesToFolder(groups, downloadName);
+      if (result.ok) {
+        setExportMessage({
+          ok: true,
+          text: `Exported ${result.count} file${result.count === 1 ? '' : 's'} to the selected folder.`,
+        });
+      } else if (!result.cancelled) {
+        setExportMessage({ ok: false, text: result.message });
+      }
+    } catch (err) {
+      setExportMessage({
+        ok: false,
+        text: `Export failed: ${(err as Error).message}`,
+      });
+    } finally {
+      exportingRef.current = false;
+      setExporting(false);
+    }
   }
 
   function handleImportFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -385,14 +383,16 @@ export default function TrajectoryGenRight({
   }
 
   const constModeOptions: { value: ConstMode; label: string }[] = [
-    { value: 'velocity', label: 'Speed' },
     { value: 'angle', label: 'Angle' },
+    { value: 'velocity', label: 'Speed' },
   ];
 
   // Tab label: (dx, dy) both to 3 dp
   function tabLabel(g: TrajGroup) {
     return `(${g.dx.toFixed(3)}, ${g.dy.toFixed(3)})`;
   }
+
+  const totalTrajectoryCount = groups.reduce((sum, g) => sum + g.trajectories.length, 0);
 
   return (
     <aside ref={containerRef} className="flex flex-col bg-gray-900 border-l border-gray-700 h-full overflow-hidden" style={{ width }}>
@@ -644,9 +644,35 @@ export default function TrajectoryGenRight({
           {/* Bottom controls */}
           <div className="flex-1 border-gray-700 p-4 space-y-4 overflow-y-auto min-h-0">
 
-            {/* Refine */}
+            {/* Manual add */}
             <div className="space-y-2">
-              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-widest">Refine Trajectories</h3>
+              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-widest">Add Manually</h3>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">Speed (m/s)</label>
+                  <FreeNumInput value={manualVel} step={0.1} min={0}
+                    onChange={(v) => setManualVel(v)}
+                    className="w-full text-xs bg-gray-800 border border-gray-700 rounded-md px-2 py-1.5 text-white focus:outline-none focus:border-blue-500" />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">Angle (deg)</label>
+                  <FreeNumInput value={manualAngle} step={0.5}
+                    onChange={(v) => setManualAngle(v)}
+                    className="w-full text-xs bg-gray-800 border border-gray-700 rounded-md px-2 py-1.5 text-white focus:outline-none focus:border-blue-500" />
+                </div>
+              </div>
+              <button
+                onClick={handleAddManual}
+                className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-lg bg-gray-700 hover:bg-gray-600 text-white transition-colors"
+              >
+                <Plus size={13} />
+                Add Trajectory
+              </button>
+            </div>
+
+            {/* Refine all */}
+            <div className="space-y-2">
+              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-widest">Refine All Trajectories</h3>
               <div>
                 <label className="text-xs text-gray-500 block mb-1">Keep Constant</label>
                 <div className="flex rounded-md overflow-hidden border border-gray-700">
@@ -681,41 +707,15 @@ export default function TrajectoryGenRight({
               </div>
               <button
                 onClick={handleRefine}
-                disabled={refining || trajectories.length === 0}
+                disabled={refining || totalTrajectoryCount === 0}
                 className={`w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-lg transition-colors ${
-                  refining || trajectories.length === 0
+                  refining || totalTrajectoryCount === 0
                     ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
                     : 'bg-amber-600 hover:bg-amber-500 text-white'
                 }`}
               >
                 <RefreshCw size={13} className={refining ? 'animate-spin' : ''} />
-                {refining ? 'Refining...' : 'Refine Trajectories'}
-              </button>
-            </div>
-
-            {/* Manual add */}
-            <div className="space-y-2">
-              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-widest">Add Manually</h3>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="text-xs text-gray-500 block mb-1">Speed (m/s)</label>
-                  <FreeNumInput value={manualVel} step={0.1} min={0}
-                    onChange={(v) => setManualVel(v)}
-                    className="w-full text-xs bg-gray-800 border border-gray-700 rounded-md px-2 py-1.5 text-white focus:outline-none focus:border-blue-500" />
-                </div>
-                <div>
-                  <label className="text-xs text-gray-500 block mb-1">Angle (deg)</label>
-                  <FreeNumInput value={manualAngle} step={0.5}
-                    onChange={(v) => setManualAngle(v)}
-                    className="w-full text-xs bg-gray-800 border border-gray-700 rounded-md px-2 py-1.5 text-white focus:outline-none focus:border-blue-500" />
-                </div>
-              </div>
-              <button
-                onClick={handleAddManual}
-                className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-lg bg-gray-700 hover:bg-gray-600 text-white transition-colors"
-              >
-                <Plus size={13} />
-                Add Trajectory
+                {refining ? 'Refining...' : 'Refine All Trajectories'}
               </button>
             </div>
 
@@ -779,17 +779,27 @@ export default function TrajectoryGenRight({
                 />
               </div>
               <button
+                type="button"
                 onClick={handleDownload}
-                disabled={trajectories.length === 0}
+                disabled={totalTrajectoryCount === 0 || exporting}
                 className={`w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-lg transition-colors ${
-                  trajectories.length === 0
+                  totalTrajectoryCount === 0 || exporting
                     ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
                     : 'bg-green-700 hover:bg-green-600 text-white'
                 }`}
               >
-                <Download size={13} />
-                Download Trajectories
+                <Download size={13} className={exporting ? 'animate-pulse' : ''} />
+                {exporting ? 'Exporting...' : 'Download All Trajectories'}
               </button>
+              {exportMessage && (
+                <p className={`text-xs leading-snug ${exportMessage.ok ? 'text-green-400' : 'text-red-400'}`}>
+                  {exportMessage.text}
+                </p>
+              )}
+              <p className="text-xs text-gray-600 leading-snug">
+                Exports one JSON per goal tab as{' '}
+                <span className="font-mono text-gray-500">name (dx, dy).json</span>
+              </p>
             </div>
           </div>
         </>

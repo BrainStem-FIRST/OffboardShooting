@@ -300,7 +300,7 @@ export default function TrajectoryGenLeft({ params, onChange, onGenerate, genera
           }`}
         >
           {generating ? <Loader size={15} className="animate-spin" /> : <Play size={15} />}
-          {generating ? 'Generating...' : 'Generate Trajectories'}
+          {generating ? 'Generating & Refining...' : 'Generate Trajectories'}
         </button>
 
         {/* Estimated count hint */}
