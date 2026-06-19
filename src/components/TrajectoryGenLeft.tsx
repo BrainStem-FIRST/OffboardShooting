@@ -106,8 +106,9 @@ function RangeRow({ label, unit, min, max, step, valMin, valMax, onChangeMin, on
     dragging.current = null;
   }, []);
 
-  const minPct = ((valMin - min) / (max - min)) * 100;
-  const maxPct = ((valMax - min) / (max - min)) * 100;
+  const clampPct = (v: number) => Math.max(0, Math.min(100, ((v - min) / (max - min)) * 100));
+  const minPct = clampPct(valMin);
+  const maxPct = clampPct(valMax);
 
   return (
     <div className="space-y-2">
@@ -136,12 +137,12 @@ function RangeRow({ label, unit, min, max, step, valMin, valMax, onChangeMin, on
         {/* Min thumb */}
         <div
           className="absolute w-3.5 h-3.5 bg-blue-400 border-2 border-blue-300 rounded-full shadow"
-          style={{ left: `${minPct}%`, transform: 'translateX(-50%)' }}
+          style={{ left: `${minPct}%`, transform: `translateX(-${minPct}%)` }}
         />
         {/* Max thumb */}
         <div
           className="absolute w-3.5 h-3.5 bg-blue-400 border-2 border-blue-300 rounded-full shadow"
-          style={{ left: `${maxPct}%`, transform: 'translateX(-50%)' }}
+          style={{ left: `${maxPct}%`, transform: `translateX(-${maxPct}%)` }}
         />
       </div>
       <div className="flex gap-2">
