@@ -36,18 +36,180 @@ export function angleBetweenPoints(
   return Math.atan2(physDy, physDx) * (180 / Math.PI);
 }
 
-export function empiricalFromFirstTwoPoints(
+export const GRAVITY_MS2 = 9.81;
+
+/**
+ * Shift each point upward by ½g·t² (t = elapsed time from the first point) to undo
+ * gravitational sag. The first point is unchanged.
+ */
+export function gravityCorrectedPoints(
   points: TrajectoryPoint[],
   pixelsPerMeter: number,
   framerate: number
+): TrajectoryPoint[] {
+  if (points.length === 0 || pixelsPerMeter <= 0 || framerate <= 0) return [];
+  const sorted = [...points].sort((a, b) => a.frame - b.frame);
+  const frame0 = sorted[0].frame;
+  return sorted.map((pt, i) => {
+    if (i === 0) return { ...pt };
+    const t = (pt.frame - frame0) / framerate;
+    // x = 0.5 * a * t^2
+    const offsetPx = 0.5 * GRAVITY_MS2 * t * t * pixelsPerMeter;
+    return { x: pt.x, y: pt.y - offsetPx, frame: pt.frame };
+  });
+}
+
+function toPhysicalMeters(points: TrajectoryPoint[], pixelsPerMeter: number): { x: number; y: number }[] {
+  if (points.length === 0) return [];
+  const p0 = points[0];
+  return points.map((p) => ({
+    x: (p.x - p0.x) / pixelsPerMeter,
+    y: (p0.y - p.y) / pixelsPerMeter,
+  }));
+}
+
+/** R² of a linear fit (y ~ x) to points in physical coordinates. 1 = perfectly straight. */
+export function lineFitR2(points: TrajectoryPoint[], pixelsPerMeter: number): number | null {
+  if (points.length < 2 || pixelsPerMeter <= 0) return null;
+  const phys = toPhysicalMeters(points, pixelsPerMeter);
+  const n = phys.length;
+  const xMean = phys.reduce((s, p) => s + p.x, 0) / n;
+  const yMean = phys.reduce((s, p) => s + p.y, 0) / n;
+
+  let sxx = 0;
+  let sxy = 0;
+  let ssTot = 0;
+  for (const p of phys) {
+    const dx = p.x - xMean;
+    const dy = p.y - yMean;
+    sxx += dx * dx;
+    sxy += dx * dy;
+    ssTot += dy * dy;
+  }
+
+  if (ssTot < 1e-18) return 1;
+
+  let ssRes = 0;
+  if (sxx < 1e-18) {
+    const xVar = phys.reduce((s, p) => s + (p.x - xMean) ** 2, 0);
+    return xVar < 1e-18 ? 1 : 0;
+  }
+
+  const m = sxy / sxx;
+  const b = yMean - m * xMean;
+  for (const p of phys) {
+    const err = p.y - (m * p.x + b);
+    ssRes += err * err;
+  }
+  return 1 - ssRes / ssTot;
+}
+
+/** Circumradius through three physical-space points (meters); null if nearly collinear. */
+function circumradiusMeters(
+  p1: { x: number; y: number },
+  p2: { x: number; y: number },
+  p3: { x: number; y: number }
+): number | null {
+  const a = Math.hypot(p2.x - p3.x, p2.y - p3.y);
+  const b = Math.hypot(p1.x - p3.x, p1.y - p3.y);
+  const c = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+  const s = (a + b + c) / 2;
+  const areaSq = s * (s - a) * (s - b) * (s - c);
+  if (areaSq <= 1e-18) return null;
+  return (a * b * c) / (4 * Math.sqrt(areaSq));
+}
+
+/** Mean circumradius over consecutive triplets; larger radius = straighter path. */
+export function averageRadiusOfCurvature(
+  points: TrajectoryPoint[],
+  pixelsPerMeter: number
+): number | null {
+  if (points.length < 3 || pixelsPerMeter <= 0) return null;
+  const phys = toPhysicalMeters(points, pixelsPerMeter);
+  const radii: number[] = [];
+  for (let i = 0; i < phys.length - 2; i++) {
+    const r = circumradiusMeters(phys[i], phys[i + 1], phys[i + 2]);
+    if (r !== null) radii.push(r);
+  }
+  if (radii.length === 0) return null;
+  return radii.reduce((s, r) => s + r, 0) / radii.length;
+}
+
+export interface GravityCorrectionQuality {
+  r2: number | null;
+  avgRadiusOfCurvature: number | null;
+}
+
+/** Line-fit quality of gravity-corrected points used for exit estimates. */
+export function gravityCorrectionQuality(
+  points: TrajectoryPoint[],
+  pixelsPerMeter: number,
+  framerate: number,
+  numPoints: number
+): GravityCorrectionQuality {
+  const sorted = [...points].sort((a, b) => a.frame - b.frame);
+  const n = Math.max(2, Math.floor(numPoints));
+  if (sorted.length < n || pixelsPerMeter <= 0 || framerate <= 0) {
+    return { r2: null, avgRadiusOfCurvature: null };
+  }
+  const corrected = gravityCorrectedPoints(
+    sorted.slice(0, n),
+    pixelsPerMeter,
+    framerate
+  );
+  return {
+    r2: lineFitR2(corrected, pixelsPerMeter),
+    avgRadiusOfCurvature: averageRadiusOfCurvature(corrected, pixelsPerMeter),
+  };
+}
+
+/** Normalized weights favoring earlier consecutive pairs (first pair highest). */
+export function decreasingPairWeights(pairCount: number): number[] {
+  if (pairCount <= 0) return [];
+  if (pairCount === 1) return [1];
+  const raw = Array.from({ length: pairCount }, (_, i) => (pairCount - i) ** 2);
+  const sum = raw.reduce((a, b) => a + b, 0);
+  return raw.map((w) => w / sum);
+}
+
+/** Estimate exit speed/angle from the first N points using weighted consecutive pairs. */
+export function empiricalFromPoints(
+  points: TrajectoryPoint[],
+  pixelsPerMeter: number,
+  framerate: number,
+  numPoints: number
 ): { speed: number | null; angle: number | null } {
   const sorted = [...points].sort((a, b) => a.frame - b.frame);
-  if (sorted.length < 2) return { speed: null, angle: null };
-  const p1 = sorted[0];
-  const p2 = sorted[1];
+  const n = Math.max(2, Math.floor(numPoints));
+  if (sorted.length < n) return { speed: null, angle: null };
+
+  const subset = sorted.slice(0, n);
+  const corrected = gravityCorrectedPoints(subset, pixelsPerMeter, framerate);
+  const pairCount = n - 1;
+  const weights = decreasingPairWeights(pairCount);
+
+  let speedSum = 0;
+  let speedWeightSum = 0;
+  let angleSum = 0;
+  let angleWeightSum = 0;
+
+  for (let i = 0; i < pairCount; i++) {
+    const w = weights[i];
+    const speed = speedBetweenPoints(corrected[i], corrected[i + 1], pixelsPerMeter, framerate);
+    const angle = angleBetweenPoints(corrected[i], corrected[i + 1], pixelsPerMeter);
+    if (speed !== null) {
+      speedSum += w * speed;
+      speedWeightSum += w;
+    }
+    if (angle !== null) {
+      angleSum += w * angle;
+      angleWeightSum += w;
+    }
+  }
+
   return {
-    speed: speedBetweenPoints(p1, p2, pixelsPerMeter, framerate),
-    angle: angleBetweenPoints(p1, p2, pixelsPerMeter),
+    speed: speedWeightSum > 0 ? speedSum / speedWeightSum : null,
+    angle: angleWeightSum > 0 ? angleSum / angleWeightSum : null,
   };
 }
 

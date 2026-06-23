@@ -1,7 +1,7 @@
 import { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { VideoData, TrajectoryPoint, Meterstick } from '../types';
-import { simulateShot } from '../simulation';
+import { simulateShot, gravityCorrectedPoints } from '../simulation';
 import { buildTrajectorySegments, activeSegmentAtFrame, firstTrajectoryPoint } from '../utils/trajectorySegments';
 
 interface Props {
@@ -340,6 +340,9 @@ export default function VideoDisplay({
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+    const numPointsForEstimate = Math.max(2, video.empiricalNumPoints ?? 2);
+    const ppm = video.meterstick.length;
+
     for (const seg of visibleSegments) {
       const sorted = [...seg.points].sort((a, b) => a.frame - b.frame);
       if (sorted.length >= 2) {
@@ -359,10 +362,32 @@ export default function VideoDisplay({
         ctx.lineWidth = 1.5;
         ctx.stroke();
       });
+
+      if (ppm > 0 && video.framerate > 0 && sorted.length >= 2) {
+        const subset = sorted.slice(0, Math.min(numPointsForEstimate, sorted.length));
+        const corrected = gravityCorrectedPoints(subset, ppm, video.framerate);
+        if (corrected.length >= 2) {
+          ctx.beginPath();
+          corrected.forEach((pt, i) => { if (i === 0) ctx.moveTo(pt.x, pt.y); else ctx.lineTo(pt.x, pt.y); });
+          ctx.strokeStyle = 'rgba(156, 163, 175, 0.6)';
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([4, 4]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+        corrected.forEach((pt) => {
+          ctx.beginPath();
+          ctx.arc(pt.x, pt.y, 4, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(156, 163, 175, 0.85)';
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(75, 85, 99, 0.9)';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        });
+      }
     }
 
     const { exitVelocity, exitAngle, dragCoefficient, magnusGain } = video.simulationParams;
-    const ppm = video.meterstick.length;
 
     if (video.showSimulation && ppm > 0 && launchPoint) {
       const simPts = simulateShot(exitVelocity, exitAngle, dragCoefficient, magnusGain);

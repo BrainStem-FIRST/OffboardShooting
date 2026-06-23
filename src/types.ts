@@ -27,6 +27,7 @@ export interface VideoData {
   showSimulation: boolean;
   currentFrame: number;
   framerate: number; // video fps for empirical velocity calculations
+  empiricalNumPoints: number; // plotted points used for exit vel/angle estimate (min 2)
 }
 
 export interface GeneratedTrajectory {

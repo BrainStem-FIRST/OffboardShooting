@@ -3,7 +3,7 @@ import {
   Upload, Film, Trash2, Crosshair, RotateCcw, Save, Trash,
 } from 'lucide-react';
 import { VideoData, TrajectoryPoint, Meterstick } from '../types';
-import { empiricalFromFirstTwoPoints } from '../simulation';
+import { empiricalFromPoints, gravityCorrectionQuality } from '../simulation';
 import {
   buildTrajectorySegments,
   segmentAtFrame,
@@ -15,8 +15,8 @@ import {
   TrajectorySaveFile,
 } from '../utils/trajectorySegments';
 import {
-  panelAside, panelTab, panelSectionTitle, panelItemTitle, panelLabel, panelBody,
-  panelHint, panelMeta, panelInput, panelBtn, panelBtnPrimary, panelListItem,
+  panelAside, panelTab, panelSectionTitle, panelSubsectionTitle, panelItemTitle, panelLabel, panelBody,
+  panelHint, panelMeta, panelInput, panelInputNumeric, panelBtn, panelBtnPrimary, panelListItem,
   panelEmpty, panelMono, panelContent, panelDivider,
 } from './panelStyles';
 
@@ -52,6 +52,61 @@ function FramerateInput({ value, onChange }: { value: number; onChange: (v: numb
   );
 }
 
+function NumPointsInput({
+  value,
+  onChange,
+  max,
+}: {
+  value: number;
+  onChange: (v: number) => void;
+  max: number;
+}) {
+  const [raw, setRaw] = useState(String(value));
+  const [focused, setFocused] = useState(false);
+  const min = 2;
+  const sliderMax = Math.max(min, max);
+
+  useEffect(() => {
+    if (!focused) setRaw(String(value));
+  }, [value, focused]);
+
+  function commit(str: string) {
+    const stripped = str.replace(/[^0-9]/g, '');
+    let n = parseInt(stripped, 10);
+    if (isNaN(n)) n = min;
+    n = Math.max(min, n);
+    setRaw(String(n));
+    onChange(n);
+  }
+
+  return (
+    <div className="space-y-1.5" title="Number of plotted points to use when estimating exit velocity and exit angle.">
+      <div className="flex items-center justify-between gap-2">
+        <label className="text-sm text-gray-400 whitespace-nowrap flex-shrink-0">Num points to use</label>
+        <input
+          type="text"
+          inputMode="numeric"
+          value={raw}
+          onChange={(e) => setRaw(e.target.value)}
+          onFocus={() => setFocused(true)}
+          onBlur={(e) => { setFocused(false); commit(e.target.value); }}
+          onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+          className={panelInputNumeric}
+        />
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={sliderMax}
+        step={1}
+        value={Math.min(value, sliderMax)}
+        onChange={(e) => onChange(parseInt(e.target.value, 10))}
+        className="w-full h-1.5 accent-blue-500 cursor-pointer"
+      />
+    </div>
+  );
+}
+
 interface Props {
   videos: VideoData[];
   selectedVideo: VideoData | null;
@@ -70,6 +125,8 @@ interface Props {
   onFrameChange: (frame: number) => void;
   framerate: number;
   onFramerateChange: (fps: number) => void;
+  empiricalNumPoints: number;
+  onEmpiricalNumPointsChange: (n: number) => void;
   meterstick: Meterstick;
   canUndo: boolean;
   canRedo: boolean;
@@ -99,6 +156,8 @@ export default function SysIdSidebar({
   onFrameChange,
   framerate,
   onFramerateChange,
+  empiricalNumPoints,
+  onEmpiricalNumPointsChange,
   meterstick,
   canUndo,
   canRedo,
@@ -137,9 +196,31 @@ export default function SysIdSidebar({
     const ppm = meterstick.length;
     return segments.map((seg) => ({
       ...seg,
-      ...empiricalFromFirstTwoPoints(seg.points, ppm, framerate),
+      ...empiricalFromPoints(seg.points, ppm, framerate, empiricalNumPoints),
     }));
-  }, [segments, meterstick.length, framerate]);
+  }, [segments, meterstick.length, framerate, empiricalNumPoints]);
+
+  const numPointsSliderMax = useMemo(() => {
+    const longest = segments.reduce((m, s) => Math.max(m, s.points.length), 0);
+    return Math.max(longest, empiricalNumPoints, 10);
+  }, [segments, empiricalNumPoints]);
+
+  const grayLineQuality = useMemo(() => {
+    if (!editingSegment) return { r2: null, avgRadiusOfCurvature: null };
+    return gravityCorrectionQuality(
+      editingSegment.points,
+      meterstick.length,
+      framerate,
+      empiricalNumPoints
+    );
+  }, [editingSegment, meterstick.length, framerate, empiricalNumPoints]);
+
+  function formatRadius(r: number | null): string {
+    if (r === null) return '—';
+    if (r > 999) return '>999 m';
+    if (r > 100) return `${r.toFixed(0)} m`;
+    return `${r.toFixed(1)} m`;
+  }
 
   const averages = useMemo(() => {
     const withSpeed = segmentStats.filter((s) => s.speed !== null);
@@ -282,7 +363,8 @@ export default function SysIdSidebar({
             </p>
           ) : (
             <>
-              <div className="flex-shrink-0 p-4 border-b border-gray-700 space-y-3">
+              {/* Section 1: video info & instructions */}
+              <div className="flex-shrink-0 p-4 border-b border-gray-700 space-y-2">
                 <h2 className={`${panelItemTitle} truncate`} title={selectedVideo.name}>
                   {selectedVideo.name}
                 </h2>
@@ -298,28 +380,60 @@ export default function SysIdSidebar({
                   )}
                 </p>
 
-                {plottingMode && (
-                  <p className={panelBody}>
-                    Click on the ball to plot · ← → to step frames · Delete to remove current point · Ctrl+Z / Ctrl+Y to undo/redo
-                  </p>
-                )}
+                <p className={panelBody}>
+                  Click on video to plot points. Arrow keys to step frames. Delete key to remove current point. Ctrl + Z / Ctrl + Y to undo/redo.
+                </p>
+              </div>
 
-                <div className="pt-2 border-t border-gray-800 space-y-2">
-                  <p className={panelBody}>
-                    Set framerate and calibrate the meterstick. Exit speed and angle are estimated from each trajectory&apos;s first two points.
-                  </p>
-                  <div className="flex items-center gap-2">
-                    <label className="text-sm text-gray-400 whitespace-nowrap flex-shrink-0">Framerate (fps)</label>
-                    <div className="flex-1 min-w-0">
-                      <FramerateInput value={framerate} onChange={onFramerateChange} />
-                    </div>
+              {/* Section 2: exit velocity/angle calculations */}
+              <div className="flex-shrink-0 p-4 border-b border-gray-700 space-y-2">
+                <h3 className={panelSubsectionTitle}>Exit velocity / angle</h3>
+                <p className={panelBody}>
+                  Set framerate and calibrate the meterstick on the video. Exit speed and angle use gravity-corrected points (gray dots)—each shifted up by ½g·t² to undo sag—then weighted toward the earliest pairs. Gray points should form a straight line when correction is accurate.
+                </p>
+                <div className="flex items-center gap-2">
+                  <label className="text-sm text-gray-400 whitespace-nowrap flex-shrink-0">Framerate (fps)</label>
+                  <div className="flex-1 min-w-0">
+                    <FramerateInput value={framerate} onChange={onFramerateChange} />
                   </div>
-                  {dt !== null && (
-                    <p className={`${panelMeta} ${panelMono}`}>dt = {dt.toFixed(6)} s</p>
-                  )}
                 </div>
+                {dt !== null && (
+                  <p className={`${panelMeta} ${panelMono}`}>dt = {dt.toFixed(6)} s</p>
+                )}
+                <NumPointsInput
+                  value={empiricalNumPoints}
+                  onChange={onEmpiricalNumPointsChange}
+                  max={numPointsSliderMax}
+                />
+                {editingSegment && (
+                  <div className="pt-1 space-y-1">
+                    <p className={panelMeta}>
+                      Gravity offsetted points quality
+                    </p>
+                    <div className={`flex items-baseline gap-4 ${panelMono} text-sm text-gray-300`}>
+                      <div title="Linear fit R² for gravity-corrected points. 1 = perfectly straight.">
+                        <span className={panelMeta}>R² </span>
+                        <span className="font-semibold text-white">
+                          {grayLineQuality.r2 !== null ? grayLineQuality.r2.toFixed(4) : '—'}
+                        </span>
+                      </div>
+                      <div title="Average radius of curvature across consecutive gray-point triplets. Larger = straighter; very large means near-linear.">
+                        <span className={panelMeta}>Avg radius </span>
+                        <span className="font-semibold text-white">
+                          {formatRadius(grayLineQuality.avgRadiusOfCurvature)}
+                        </span>
+                      </div>
+                    </div>
+                    {empiricalNumPoints < 3 && (
+                      <p className={panelHint}>Avg radius requires at least 3 points.</p>
+                    )}
+                  </div>
+                )}
+              </div>
 
-                {/* Editing controls */}
+              {/* Section 3: video annotation controls */}
+              <div className="flex-shrink-0 p-4 border-b border-gray-700 space-y-3">
+                <h3 className={panelSubsectionTitle}>Video annotation</h3>
                 <div className="flex flex-wrap gap-2">
                   <button onClick={onUndo} disabled={!canUndo} title="Undo (Ctrl+Z)" className={panelBtn}>
                     Undo
@@ -356,7 +470,6 @@ export default function SysIdSidebar({
                   </button>
                 </div>
 
-                {/* Show all / current toggle */}
                 <div className="rounded-md bg-gray-950 border border-gray-700 p-0.5 flex gap-0.5">
                   <button
                     onClick={() => onShowAllTrajectoriesChange(true)}

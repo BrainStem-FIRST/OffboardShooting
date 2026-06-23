@@ -33,6 +33,7 @@ function makeDefaultVideo(id: string, name: string, url: string): VideoData {
     showSimulation: false,
     currentFrame: 0,
     framerate: 30,
+    empiricalNumPoints: 2,
   };
 }
 
@@ -321,6 +322,15 @@ export default function App() {
     [selectedId]
   );
 
+  const handleEmpiricalNumPointsChange = useCallback(
+    (empiricalNumPoints: number) => {
+      if (!selectedId) return;
+      updateVideo(selectedId, { empiricalNumPoints });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selectedId]
+  );
+
   const handleToggleSimulation = useCallback(() => {
     if (!selectedId) return;
     setVideos((prev) =>
@@ -450,6 +460,8 @@ export default function App() {
                 onFrameChange={handleFrameChange}
                 framerate={selectedVideo?.framerate ?? 30}
                 onFramerateChange={handleFramerateChange}
+                empiricalNumPoints={selectedVideo?.empiricalNumPoints ?? 2}
+                onEmpiricalNumPointsChange={handleEmpiricalNumPointsChange}
                 meterstick={selectedVideo?.meterstick ?? { x: 80, y: 680, length: 160 }}
                 canUndo={canUndo}
                 canRedo={canRedo}
