@@ -307,7 +307,8 @@ export interface FitGridConfig {
   numSplits: number;
   numRecursions: number;
   fitTargets: FitTargetParams;
-  fitAll: boolean;
+  fitWholeVideo: boolean;
+  fitAllVideos: boolean;
 }
 
 export const DEFAULT_FIT_GRID_CONFIG: FitGridConfig = {
@@ -324,7 +325,8 @@ export const DEFAULT_FIT_GRID_CONFIG: FitGridConfig = {
   numSplits: 8,
   numRecursions: 3,
   fitTargets: DEFAULT_FIT_TARGET_PARAMS,
-  fitAll: false,
+  fitWholeVideo: false,
+  fitAllVideos: false,
 };
 
 export interface FitProgress {
@@ -336,6 +338,15 @@ export interface FitProgress {
   progress: number;
 }
 
+export interface FitRankEntry {
+  rank: number;
+  visibleMeanDistance: number;
+  exitVelocity: number;
+  exitAngle: number;
+  dragCoefficient: number;
+  magnusGain: number;
+}
+
 export interface TrajectoryFitResult {
   exitVelocity: number;
   exitAngle: number;
@@ -344,7 +355,10 @@ export interface TrajectoryFitResult {
   magnusPower: number;
   meanDistance: number;
   rmse: number;
+  topFits: FitRankEntry[];
 }
+
+const TOP_FIT_COUNT = 10;
 
 /** @deprecated Use TrajectoryFitResult */
 export type DragMagnusFitResult = TrajectoryFitResult;
@@ -362,13 +376,15 @@ export function countFitDimensions(targets: FitTargetParams): number {
 export function computeFitTotalEvals(
   numSplits: number,
   numRecursions: number,
-  targets: FitTargetParams
+  targets: FitTargetParams,
+  trajectoryCount = 1
 ): number {
   const dims = countFitDimensions(targets);
   if (dims === 0) return 0;
   const n = Math.max(2, Math.floor(numSplits));
   const r = Math.max(1, Math.floor(numRecursions));
-  return r * n ** dims;
+  const gridEvals = r * n ** dims;
+  return gridEvals * Math.max(1, trajectoryCount);
 }
 
 const FIT_PENALTY = 100;
@@ -429,6 +445,8 @@ export interface FitTrajectoryInput {
   dragCoefficient: number;
   magnusGain: number;
   magnusPower: number;
+  pixelsPerMeter: number;
+  framerate: number;
 }
 
 interface FitObservationSet {
@@ -437,14 +455,10 @@ interface FitObservationSet {
   fixed: FitSimParams;
 }
 
-function buildObservationSets(
-  trajectories: FitTrajectoryInput[],
-  ppm: number,
-  framerate: number
-): FitObservationSet[] {
+function buildObservationSets(trajectories: FitTrajectoryInput[]): FitObservationSet[] {
   const sets: FitObservationSet[] = [];
   for (const traj of trajectories) {
-    const prepped = preprocessObservations(traj.points, ppm, framerate);
+    const prepped = preprocessObservations(traj.points, traj.pixelsPerMeter, traj.framerate);
     if (!prepped) continue;
     sets.push({
       ...prepped,
@@ -515,7 +529,7 @@ function evaluateFitCost(
   }
 
   return {
-    cost: sumDist,
+    cost: sumSq / count,
     meanDistance: sumDist / count,
     rmse: Math.sqrt(sumSq / count),
   };
@@ -527,7 +541,7 @@ export interface TrajectoryFitCost {
   rmse: number;
 }
 
-/** Same cost metric as fit: sum of time-aligned point distances (meters). */
+/** Same cost metric as fit: mean squared time-aligned point distance (m²). */
 export function computeTrajectoryFitCost(
   points: { x: number; y: number; frame: number }[],
   params: {
@@ -561,7 +575,7 @@ function evaluateCombinedFitCost(
   trial: FitSimParams,
   observationSets: FitObservationSet[],
   fitTargets: FitTargetParams,
-  fitAll: boolean
+  useMinAcrossTrajectories: boolean
 ): { cost: number; meanDistance: number; rmse: number } {
   if (observationSets.length === 0) {
     return { cost: Infinity, meanDistance: Infinity, rmse: Infinity };
@@ -575,7 +589,7 @@ function evaluateCombinedFitCost(
     )
   );
 
-  if (fitAll && observationSets.length > 1) {
+  if (useMinAcrossTrajectories && observationSets.length > 1) {
     let bestIdx = 0;
     let bestCost = perTraj[0].cost;
     for (let i = 1; i < perTraj.length; i++) {
@@ -681,13 +695,11 @@ function shrinkDimRange(grid: number[], bestIndex: number, numSplits: number, sp
 }
 
 // Recursive N-D grid search over selected launch/physics parameters.
-// Cost = sum of Euclidean distances between each plotted point and the sim at the
-// same time of flight. With fitAll, cost is the lowest cost among all trajectories.
+// Cost = mean squared distance between each plotted point and the sim at the
+// same time of flight. With multiple trajectories, cost is the lowest among them.
 // Runs async in chunks to stay responsive and cancellable.
 export function fitDragMagnusAsync(
   trajectories: FitTrajectoryInput[],
-  ppm: number,
-  framerate: number,
   onProgress: (progress: FitProgress) => void,
   signal: { cancelled: boolean },
   config: FitGridConfig = DEFAULT_FIT_GRID_CONFIG
@@ -702,10 +714,11 @@ export function fitDragMagnusAsync(
       return;
     }
 
-    const activeTrajectories = config.fitAll
+    const useMultipleTrajectories = config.fitAllVideos || config.fitWholeVideo;
+    const activeTrajectories = useMultipleTrajectories
       ? trajectories
       : trajectories.slice(0, 1);
-    const observationSets = buildObservationSets(activeTrajectories, ppm, framerate);
+    const observationSets = buildObservationSets(activeTrajectories);
 
     if (observationSets.length === 0) {
       resolve(null);
@@ -714,7 +727,7 @@ export function fitDragMagnusAsync(
 
     const primary = activeTrajectories[0];
     if (!config.fitTargets.fitExitVelocity) {
-      const needsVelocity = config.fitAll
+      const needsVelocity = useMultipleTrajectories
         ? observationSets.every((set) => set.fixed.exitVelocity > 0)
         : primary.exitVelocity > 0;
       if (!needsVelocity) {
@@ -724,7 +737,9 @@ export function fitDragMagnusAsync(
     }
 
     const gridEvalsPerRecursion = numSplits ** numDims;
-    const totalEvals = numRecursions * gridEvalsPerRecursion;
+    const totalGridEvals = numRecursions * gridEvalsPerRecursion;
+    const totalEvals = totalGridEvals * observationSets.length;
+    const useMinCost = observationSets.length > 1;
 
     const initial: FitSimParams = {
       exitVelocity: primary.exitVelocity,
@@ -738,6 +753,58 @@ export function fitDragMagnusAsync(
     let currentParams = { ...initial };
     let bestMetrics = { cost: Infinity, meanDistance: Infinity, rmse: Infinity };
 
+    interface TopFitCandidate {
+      cost: number;
+      visibleMeanDistance: number;
+      exitVelocity: number;
+      exitAngle: number;
+      dragCoefficient: number;
+      magnusGain: number;
+    }
+    const topFitCandidates: TopFitCandidate[] = [];
+
+    function topFitKey(e: TopFitCandidate): string {
+      return `${e.exitVelocity}|${e.exitAngle}|${e.dragCoefficient}|${e.magnusGain}`;
+    }
+
+    function recordTopFit(trial: FitSimParams, fitCost: number) {
+      if (!Number.isFinite(fitCost)) return;
+
+      const primarySet = observationSets[0];
+      const merged = mergeTrialParams(trial, primarySet.fixed, config.fitTargets);
+      const visibleMetrics = evaluateFitCost(merged, primarySet.obs, primarySet.simMaxTime);
+      if (!Number.isFinite(visibleMetrics.meanDistance)) return;
+
+      const entry: TopFitCandidate = {
+        cost: fitCost,
+        visibleMeanDistance: visibleMetrics.meanDistance,
+        exitVelocity: merged.exitVelocity,
+        exitAngle: merged.exitAngle,
+        dragCoefficient: merged.drag,
+        magnusGain: merged.magnus,
+      };
+
+      const key = topFitKey(entry);
+      const dupeIdx = topFitCandidates.findIndex((e) => topFitKey(e) === key);
+      if (dupeIdx >= 0) {
+        if (fitCost >= topFitCandidates[dupeIdx].cost) return;
+        topFitCandidates.splice(dupeIdx, 1);
+      }
+
+      if (
+        topFitCandidates.length >= TOP_FIT_COUNT &&
+        fitCost >= topFitCandidates[topFitCandidates.length - 1].cost
+      ) {
+        return;
+      }
+
+      topFitCandidates.push(entry);
+      topFitCandidates.sort((a, b) => a.cost - b.cost);
+      if (topFitCandidates.length > TOP_FIT_COUNT) {
+        topFitCandidates.length = TOP_FIT_COUNT;
+      }
+    }
+
     let completedEvals = 0;
     let recursionIndex = 0;
 
@@ -748,11 +815,19 @@ export function fitDragMagnusAsync(
         iteration,
         gridSize: gridEvalsPerRecursion,
         totalEvals,
-        progress: completedEvals / totalEvals,
+        progress: (completedEvals * observationSets.length) / totalEvals,
       });
     }
 
     function finishFit() {
+      const topFits: FitRankEntry[] = topFitCandidates.map((e, i) => ({
+        rank: i + 1,
+        visibleMeanDistance: e.visibleMeanDistance,
+        exitVelocity: e.exitVelocity,
+        exitAngle: e.exitAngle,
+        dragCoefficient: e.dragCoefficient,
+        magnusGain: e.magnusGain,
+      }));
       resolve({
         exitVelocity: currentParams.exitVelocity,
         exitAngle: currentParams.exitAngle,
@@ -761,6 +836,7 @@ export function fitDragMagnusAsync(
         magnusPower: currentParams.magnusPower,
         meanDistance: bestMetrics.meanDistance,
         rmse: bestMetrics.rmse,
+        topFits,
       });
     }
 
@@ -815,7 +891,7 @@ export function fitDragMagnusAsync(
           trial,
           observationSets,
           config.fitTargets,
-          config.fitAll && observationSets.length > 1
+          useMinCost
         );
 
         if (metrics.cost < localBestCost) {
@@ -823,6 +899,8 @@ export function fitDragMagnusAsync(
           localBestMetrics = metrics;
           localBestIndices = indices;
         }
+
+        recordTopFit(trial, metrics.cost);
 
         completedEvals++;
         reportProgress(flatIndex + 1);

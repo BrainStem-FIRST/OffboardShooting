@@ -1,7 +1,7 @@
 import { useRef, useState, useEffect, useMemo } from 'react';
 import { Eye, EyeOff, Zap, X } from 'lucide-react';
 import { LaunchParams, TrajectoryPoint, Meterstick } from '../types';
-import { fitDragMagnusAsync, GRAVITY_MS2, SIM_DT, DEFAULT_FIT_GRID_CONFIG, DEFAULT_FIT_TARGET_PARAMS, FitProgress, FitTargetParams, computeFitTotalEvals, computeTrajectoryFitCost } from '../simulation';
+import { fitDragMagnusAsync, GRAVITY_MS2, SIM_DT, DEFAULT_FIT_GRID_CONFIG, DEFAULT_FIT_TARGET_PARAMS, FitProgress, FitRankEntry, FitTargetParams, computeFitTotalEvals, computeTrajectoryFitCost } from '../simulation';
 import { countPlottedPoints } from '../utils/trajectorySegments';
 import {
   panelAside, panelContent, panelSectionTitle, panelSubsectionTitle, panelLabelInline, panelBody, panelHint,
@@ -10,8 +10,11 @@ import {
 
 interface TrajectoryFitEntry {
   id: string;
+  videoId: string;
   points: TrajectoryPoint[];
   launchParams: LaunchParams;
+  pixelsPerMeter: number;
+  framerate: number;
 }
 
 interface Props {
@@ -21,10 +24,12 @@ interface Props {
   showSimulation: boolean;
   trajectory: TrajectoryPoint[];
   allTrajectories: TrajectoryFitEntry[];
+  allVideosTrajectories: TrajectoryFitEntry[];
   meterstick: Meterstick;
   framerate: number;
   onLaunchParamsChange: (p: LaunchParams) => void;
   onLaunchParamsChangeForTrajectory: (trajectoryId: string, p: LaunchParams) => void;
+  onLaunchParamsChangeForVideo: (videoId: string, trajectoryId: string, p: LaunchParams) => void;
   onToggleShow: () => void;
   width: number;
 }
@@ -213,25 +218,33 @@ export default function SimulationControls({
   showSimulation,
   trajectory,
   allTrajectories,
+  allVideosTrajectories,
   meterstick,
   framerate,
   onLaunchParamsChange,
   onLaunchParamsChangeForTrajectory,
+  onLaunchParamsChangeForVideo,
   onToggleShow,
   width,
 }: Props) {
   const [fitStatus, setFitStatus] = useState<'idle' | 'running' | 'ok' | 'fail'>('idle');
-  const [fitRmse, setFitRmse] = useState<number | null>(null);
+  const [topFits, setTopFits] = useState<FitRankEntry[]>([]);
   const [fitProgress, setFitProgress] = useState(0);
   const [fitProgressDetail, setFitProgressDetail] = useState<FitProgress | null>(null);
   const [fitNumSplits, setFitNumSplits] = useState(DEFAULT_FIT_GRID_CONFIG.numSplits);
   const [fitNumRecursions, setFitNumRecursions] = useState(DEFAULT_FIT_GRID_CONFIG.numRecursions);
   const [fitTargets, setFitTargets] = useState<FitTargetParams>({ ...DEFAULT_FIT_TARGET_PARAMS });
   const [fitRanges, setFitRanges] = useState<FitParamRanges>({ ...DEFAULT_FIT_RANGES });
-  const [fitAll, setFitAll] = useState(false);
+  const [fitWholeVideo, setFitWholeVideo] = useState(false);
+  const [fitAllVideos, setFitAllVideos] = useState(false);
   const cancelRef = useRef<{ cancelled: boolean } | null>(null);
 
-  const fittableTrajectories = allTrajectories.filter((t) => countPlottedPoints(t.points) >= 3);
+  const fittableTrajectories = allTrajectories.filter(
+    (t) => countPlottedPoints(t.points) >= 3 && t.pixelsPerMeter > 0 && t.framerate > 0
+  );
+  const fittableAllVideosTrajectories = allVideosTrajectories.filter(
+    (t) => countPlottedPoints(t.points) >= 3 && t.pixelsPerMeter > 0 && t.framerate > 0
+  );
   const fitDimensions = (
     (fitTargets.fitExitVelocity ? 1 : 0) +
     (fitTargets.fitExitAngle ? 1 : 0) +
@@ -239,7 +252,18 @@ export default function SimulationControls({
     (fitTargets.fitMagnus ? 1 : 0) +
     (fitTargets.fitMagnusPower ? 1 : 0)
   );
-  const fitTotalEvals = computeFitTotalEvals(fitNumSplits, fitNumRecursions, fitTargets);
+  const fitTrajectoryCount = fitAllVideos
+    ? fittableAllVideosTrajectories.length
+    : fitWholeVideo
+      ? fittableTrajectories.length
+      : 1;
+  const fitTotalEvals = computeFitTotalEvals(
+    fitNumSplits,
+    fitNumRecursions,
+    fitTargets,
+    fitTrajectoryCount
+  );
+  const videosAvailable = allVideosTrajectories.length > 0;
 
   const trajectoryCosts = useMemo(() => {
     if (meterstick.length <= 0 || framerate <= 0) {
@@ -301,15 +325,25 @@ export default function SimulationControls({
 
   const hasTrajectory = activeTrajectoryId !== null;
   const plottedCount = countPlottedPoints(trajectory);
-  const hasFitTarget = fitAll ? fittableTrajectories.length > 0 : hasTrajectory && plottedCount >= 3;
+  const fitTargetEntries = fitAllVideos
+    ? fittableAllVideosTrajectories
+    : fitWholeVideo
+      ? fittableTrajectories
+      : [];
+  const hasFitTarget = fitAllVideos
+    ? fittableAllVideosTrajectories.length > 0
+    : fitWholeVideo
+      ? fittableTrajectories.length > 0
+      : hasTrajectory && plottedCount >= 3;
   const canFit =
     hasFitTarget &&
-    meterstick.length > 0 &&
-    framerate > 0 &&
     fitDimensions > 0 &&
+    (fitAllVideos
+      ? fittableAllVideosTrajectories.length > 0
+      : meterstick.length > 0 && framerate > 0) &&
     (fitTargets.fitExitVelocity ||
-      (fitAll
-        ? fittableTrajectories.every((t) => t.launchParams.exitVelocity > 0)
+      (fitAllVideos || fitWholeVideo
+        ? fitTargetEntries.every((t) => t.launchParams.exitVelocity > 0)
         : launchParams.exitVelocity > 0));
 
   async function handleFit() {
@@ -319,17 +353,35 @@ export default function SimulationControls({
     setFitStatus('running');
     setFitProgress(0);
     setFitProgressDetail(null);
-    setFitRmse(null);
+    setTopFits([]);
 
     const activeEntry = allTrajectories.find((t) => t.id === activeTrajectoryId);
-    const orderedEntries = fitAll
-      ? [
-          ...(activeEntry && countPlottedPoints(activeEntry.points) >= 3 ? [activeEntry] : []),
-          ...fittableTrajectories.filter((t) => t.id !== activeTrajectoryId),
-        ]
-      : activeEntry && countPlottedPoints(activeEntry.points) >= 3
-        ? [activeEntry]
-        : [];
+
+    let orderedEntries: TrajectoryFitEntry[];
+    if (fitAllVideos) {
+      orderedEntries = fittableAllVideosTrajectories;
+      if (
+        activeEntry &&
+        countPlottedPoints(activeEntry.points) >= 3 &&
+        activeEntry.pixelsPerMeter > 0 &&
+        activeEntry.framerate > 0
+      ) {
+        orderedEntries = [
+          activeEntry,
+          ...fittableAllVideosTrajectories.filter(
+            (t) => !(t.id === activeEntry.id && t.videoId === activeEntry.videoId)
+          ),
+        ];
+      }
+    } else if (fitWholeVideo) {
+      orderedEntries = [
+        ...(activeEntry && countPlottedPoints(activeEntry.points) >= 3 ? [activeEntry] : []),
+        ...fittableTrajectories.filter((t) => t.id !== activeTrajectoryId),
+      ];
+    } else {
+      orderedEntries =
+        activeEntry && countPlottedPoints(activeEntry.points) >= 3 ? [activeEntry] : [];
+    }
 
     const fitInputs = orderedEntries.map((t) => ({
       points: t.points,
@@ -338,12 +390,12 @@ export default function SimulationControls({
       dragCoefficient: t.launchParams.dragCoefficient,
       magnusGain: t.launchParams.magnusGain,
       magnusPower: t.launchParams.magnusPower ?? 2,
+      pixelsPerMeter: t.pixelsPerMeter,
+      framerate: t.framerate,
     }));
 
     const result = await fitDragMagnusAsync(
       fitInputs,
-      meterstick.length,
-      framerate,
       (p) => {
         setFitProgress(p.progress);
         setFitProgressDetail(p);
@@ -355,13 +407,15 @@ export default function SimulationControls({
         numSplits: fitNumSplits,
         numRecursions: fitNumRecursions,
         fitTargets,
-        fitAll,
+        fitWholeVideo: fitAllVideos || fitWholeVideo,
+        fitAllVideos,
       }
     );
 
     if (signal.cancelled) return;
 
     if (!result) {
+      setTopFits([]);
       setFitStatus('fail');
       return;
     }
@@ -372,14 +426,21 @@ export default function SimulationControls({
     if (fitTargets.fitMagnus) updates.magnusGain = result.magnusGain;
     if (fitTargets.fitMagnusPower) updates.magnusPower = result.magnusPower;
 
-    if (fitAll) {
+    if (fitAllVideos) {
+      for (const entry of orderedEntries) {
+        onLaunchParamsChangeForVideo(entry.videoId, entry.id, {
+          ...entry.launchParams,
+          ...updates,
+        });
+      }
+    } else if (fitWholeVideo) {
       for (const entry of orderedEntries) {
         onLaunchParamsChangeForTrajectory(entry.id, { ...entry.launchParams, ...updates });
       }
     } else if (activeEntry) {
       onLaunchParamsChange({ ...launchParams, ...updates });
     }
-    setFitRmse(result.rmse);
+    setTopFits(result.topFits);
     setFitProgress(1);
     setFitProgressDetail(null);
     setFitStatus('ok');
@@ -390,6 +451,7 @@ export default function SimulationControls({
     setFitStatus('idle');
     setFitProgress(0);
     setFitProgressDetail(null);
+    setTopFits([]);
   }
 
   return (
@@ -542,13 +604,26 @@ export default function SimulationControls({
               <label className={`flex items-center gap-2 cursor-pointer ${!hasTrajectory ? 'opacity-50' : ''}`}>
                 <input
                   type="checkbox"
-                  checked={fitAll}
-                  disabled={!hasTrajectory || fitStatus === 'running'}
-                  onChange={() => setFitAll((v) => !v)}
+                  checked={fitWholeVideo}
+                  disabled={!hasTrajectory || fitStatus === 'running' || fitAllVideos}
+                  onChange={() => setFitWholeVideo((v) => !v)}
                   className="accent-blue-500"
                 />
                 <span className={`${panelHint} text-gray-300`}>
-                  Fit all{fittableTrajectories.length > 0 ? ` (${fittableTrajectories.length})` : ''}
+                  Fit whole video{fittableTrajectories.length > 0 ? ` (${fittableTrajectories.length})` : ''}
+                </span>
+              </label>
+
+              <label className={`flex items-center gap-2 cursor-pointer ${videosAvailable ? '' : 'opacity-50'}`}>
+                <input
+                  type="checkbox"
+                  checked={fitAllVideos}
+                  disabled={fitStatus === 'running' || !videosAvailable}
+                  onChange={() => setFitAllVideos((v) => !v)}
+                  className="accent-blue-500"
+                />
+                <span className={`${panelHint} text-gray-300`}>
+                  Fit all videos{fittableAllVideosTrajectories.length > 0 ? ` (${fittableAllVideosTrajectories.length})` : ''}
                 </span>
               </label>
 
@@ -558,11 +633,11 @@ export default function SimulationControls({
                   <input
                     type="number"
                     min={2}
-                    max={20}
+                    max={100}
                     step={1}
                     value={fitNumSplits}
                     disabled={!hasTrajectory || fitStatus === 'running'}
-                    onChange={(e) => setFitNumSplits(Math.max(2, Math.min(20, parseInt(e.target.value, 10) || 2)))}
+                    onChange={(e) => setFitNumSplits(Math.max(2, Math.min(100, parseInt(e.target.value, 10) || 2)))}
                     className={panelInputNumeric}
                   />
                 </div>
@@ -622,6 +697,38 @@ export default function SimulationControls({
                 </p>
               </div>
 
+              {topFits.length > 0 && (
+                <div className="space-y-1">
+                  <p className={panelHint}>Top {topFits.length} fits</p>
+                  <div className="max-h-48 overflow-y-auto rounded-lg border border-gray-700">
+                    <table className="w-full text-[11px] tabular-nums">
+                      <thead className="sticky top-0 bg-gray-900 text-gray-400">
+                        <tr>
+                          <th className="px-1.5 py-1 text-left font-normal">#</th>
+                          <th className="px-1.5 py-1 text-right font-normal">Vis err</th>
+                          <th className="px-1.5 py-1 text-right font-normal">Vel</th>
+                          <th className="px-1.5 py-1 text-right font-normal">Ang</th>
+                          <th className="px-1.5 py-1 text-right font-normal">Drag</th>
+                          <th className="px-1.5 py-1 text-right font-normal">Magn</th>
+                        </tr>
+                      </thead>
+                      <tbody className="text-gray-300">
+                        {topFits.map((fit) => (
+                          <tr key={fit.rank} className="border-t border-gray-800">
+                            <td className="px-1.5 py-1 text-left text-gray-400">{fit.rank}</td>
+                            <td className="px-1.5 py-1 text-right">{formatMeanError(fit.visibleMeanDistance)}</td>
+                            <td className="px-1.5 py-1 text-right">{fit.exitVelocity}</td>
+                            <td className="px-1.5 py-1 text-right">{fit.exitAngle}</td>
+                            <td className="px-1.5 py-1 text-right">{fit.dragCoefficient}</td>
+                            <td className="px-1.5 py-1 text-right">{fit.magnusGain}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
               {fitStatus === 'running' && (
                 <div className="space-y-1">
                   <div className="relative h-1.5 bg-gray-700 rounded-full overflow-hidden">
@@ -645,9 +752,11 @@ export default function SimulationControls({
                 <p className={`${panelHint} text-center`}>
                   {!hasTrajectory
                     ? 'Select a trajectory first'
-                    : fitAll && fittableTrajectories.length === 0
-                    ? 'Need at least one trajectory with 3+ points'
-                    : !fitAll && plottedCount < 3
+                    : fitAllVideos && fittableAllVideosTrajectories.length === 0
+                    ? 'Need at least one trajectory with 3+ points across all videos'
+                    : fitWholeVideo && fittableTrajectories.length === 0
+                    ? 'Need at least one trajectory with 3+ points in this video'
+                    : !fitWholeVideo && !fitAllVideos && plottedCount < 3
                     ? `Need ${3 - plottedCount} more plotted point${3 - plottedCount === 1 ? '' : 's'}`
                     : meterstick.length <= 0
                     ? 'Calibrate the meterstick scale first'
@@ -656,11 +765,6 @@ export default function SimulationControls({
                     : fitDimensions === 0
                     ? 'Select at least one parameter to fit'
                     : 'Set the exit velocity (m/s) first'}
-                </p>
-              )}
-              {fitStatus === 'ok' && fitRmse !== null && (
-                <p className="text-sm text-green-400 text-center">
-                  Fit complete · RMSE {(fitRmse * 100).toFixed(1)} cm
                 </p>
               )}
               {fitStatus === 'fail' && (

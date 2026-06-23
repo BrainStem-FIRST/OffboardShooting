@@ -100,6 +100,8 @@ export default function VideoDisplay({
   const [draggingZone, setDraggingZone] = useState<null | 'left' | 'right' | 'body'>(null);
   const [stickSelected, setStickSelected] = useState(false);
   const dragStartRef = useRef<{ mx: number; my: number; stickSnap: Meterstick } | null>(null);
+  const panDragRef = useRef<{ startX: number; startY: number; panX: number; panY: number } | null>(null);
+  const didPanRef = useRef(false);
   const scrubTrackRef = useRef<HTMLDivElement>(null);
   const totalFramesRef = useRef(1);
   const zoomRef = useRef(1);
@@ -107,6 +109,7 @@ export default function VideoDisplay({
 
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [isPanning, setIsPanning] = useState(false);
 
   const segments = useMemo(
     () => buildTrajectorySegments(video.trajectory),
@@ -274,8 +277,22 @@ export default function VideoDisplay({
     return null;
   }
 
+  function startPanDrag(clientX: number, clientY: number) {
+    panDragRef.current = {
+      startX: clientX,
+      startY: clientY,
+      panX: panRef.current.x,
+      panY: panRef.current.y,
+    };
+    didPanRef.current = false;
+    setIsPanning(true);
+  }
+
   function handleCanvasClick(e: React.MouseEvent) {
-    if (draggingZone) return;
+    if (draggingZone || didPanRef.current) {
+      didPanRef.current = false;
+      return;
+    }
     const pos = clientToCanvas(e.clientX, e.clientY);
     if (!plottingMode) {
       setStickSelected(hitStick(pos.x, pos.y) !== null);
@@ -299,6 +316,22 @@ export default function VideoDisplay({
   }
 
   function handleCanvasMouseDown(e: React.MouseEvent) {
+    if (zoomRef.current > 1) {
+      if (!plottingMode) {
+        const pos = clientToCanvas(e.clientX, e.clientY);
+        const zone = hitStick(pos.x, pos.y);
+        if (zone) {
+          e.preventDefault();
+          setStickSelected(true);
+          setDraggingZone(zone);
+          dragStartRef.current = { mx: pos.x, my: pos.y, stickSnap: { ...video.meterstick } };
+          return;
+        }
+      }
+      e.preventDefault();
+      startPanDrag(e.clientX, e.clientY);
+      return;
+    }
     if (plottingMode) return;
     const pos = clientToCanvas(e.clientX, e.clientY);
     const zone = hitStick(pos.x, pos.y);
@@ -310,6 +343,18 @@ export default function VideoDisplay({
   }
 
   const handleWindowMouseMove = useCallback((e: MouseEvent) => {
+    if (panDragRef.current) {
+      const dx = e.clientX - panDragRef.current.startX;
+      const dy = e.clientY - panDragRef.current.startY;
+      if (Math.abs(dx) > 2 || Math.abs(dy) > 2) didPanRef.current = true;
+      const nextPan = {
+        x: panDragRef.current.panX + dx,
+        y: panDragRef.current.panY + dy,
+      };
+      panRef.current = nextPan;
+      setPan(nextPan);
+      return;
+    }
     if (!draggingZone || !dragStartRef.current) return;
     const pos = clientToCanvas(e.clientX, e.clientY);
     const { mx, my, stickSnap } = dragStartRef.current;
@@ -327,6 +372,8 @@ export default function VideoDisplay({
   }, [draggingZone, onMetastickUpdate]);
 
   const handleWindowMouseUp = useCallback(() => {
+    panDragRef.current = null;
+    setIsPanning(false);
     setDraggingZone(null);
     dragStartRef.current = null;
   }, []);
@@ -415,25 +462,26 @@ export default function VideoDisplay({
           ctx.stroke();
         }
       }
-      sorted.forEach((pt) => {
-        if (isSkippedPoint(pt)) return;
-        const isActive = pt.frame === video.currentFrame;
-        if (!showTrajectoryPoints && !(plottingMode && isActive)) return;
-        const r = isActive ? 11 : 5;
-        ctx.beginPath();
-        ctx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
-        ctx.fillStyle = seg.color;
-        ctx.fill();
-        ctx.strokeStyle = 'white';
-        ctx.lineWidth = isActive ? 2 : 1.5;
-        ctx.stroke();
-        if (isActive) {
+      if (showTrajectoryPoints) {
+        sorted.forEach((pt) => {
+          if (isSkippedPoint(pt)) return;
+          const isActive = pt.frame === video.currentFrame;
+          const r = isActive ? 11 : 5;
           ctx.beginPath();
-          ctx.arc(pt.x, pt.y, 2.5, 0, Math.PI * 2);
-          ctx.fillStyle = 'white';
+          ctx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
+          ctx.fillStyle = seg.color;
           ctx.fill();
-        }
-      });
+          ctx.strokeStyle = 'white';
+          ctx.lineWidth = isActive ? 2 : 1.5;
+          ctx.stroke();
+          if (isActive) {
+            ctx.beginPath();
+            ctx.arc(pt.x, pt.y, 2.5, 0, Math.PI * 2);
+            ctx.fillStyle = 'white';
+            ctx.fill();
+          }
+        });
+      }
 
       const plottedSorted = plottedPoints(sorted);
       if (ppm > 0 && video.framerate > 0 && plottedSorted.length >= 2) {
@@ -546,15 +594,12 @@ export default function VideoDisplay({
     ctx.shadowColor = 'rgba(0,0,0,0.8)'; ctx.shadowBlur = 3;
     ctx.fillText('1 m', s.x + s.length / 2, s.y - 12);
     ctx.shadowBlur = 0;
-  }, [video, hoveredZone, draggingZone, stickSelected, visibleSegments, averagePoints, showTrajectoryPoints, plottingMode, launchPoint, launchParams]);
+  }, [video, hoveredZone, draggingZone, stickSelected, visibleSegments, averagePoints, showTrajectoryPoints, launchPoint, launchParams]);
 
   useEffect(() => { drawRef.current = draw; draw(); }, [draw]);
 
-  const cursor = plottingMode ? 'crosshair'
-    : draggingZone === 'body' ? 'grabbing'
-    : draggingZone === 'left' || draggingZone === 'right' ? 'col-resize'
-    : hoveredZone === 'body' ? 'grab'
-    : hoveredZone ? 'col-resize'
+  const cursor = (isPanning || draggingZone) ? 'grabbing'
+    : plottingMode ? 'crosshair'
     : 'default';
 
   return (

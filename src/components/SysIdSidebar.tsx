@@ -1,6 +1,6 @@
 import { useRef, useState, useEffect, useMemo } from 'react';
 import {
-  Upload, Film, Trash2, Crosshair, RotateCcw, Save, Trash, SkipForward,
+  Upload, Film, Trash2, Crosshair, RotateCcw, Save, Trash, SkipForward, FolderDown,
 } from 'lucide-react';
 import { VideoData, TrajectoryPoint, Meterstick } from '../types';
 import { empiricalFromPoints, gravityCorrectionQuality } from '../simulation';
@@ -9,17 +9,22 @@ import {
   activeSegmentAtFrame,
   getLaunchParams,
   countPlottedPoints,
-  videoToConfigurationSaveFile,
-  parseConfigurationFile,
-  LoadedConfiguration,
 } from '../utils/trajectorySegments';
 import {
-  panelAside, panelTab, panelSectionTitle, panelSubsectionTitle, panelItemTitle, panelLabel, panelLabelInline, panelBody,
+  PROJECT_SUBDIR,
+  configFileNameForVideo,
+  downloadConfigFiles,
+  previewProjectFiles,
+  loadProjectEntriesFromFiles,
+} from '../utils/projectIO';
+import type { ImportedProjectEntry } from '../utils/projectIO';
+import {
+  panelAside, panelTab, panelSectionTitle, panelSubsectionTitle, panelItemTitle, panelLabelInline, panelBody,
   panelHint, panelMeta, panelInput, panelInputNumeric, panelBtn, panelBtnPrimary, panelListItem,
-  panelEmpty, panelMono, panelDivider,
+  panelEmpty, panelMono,
 } from './panelStyles';
 
-type SidebarTab = 'upload' | 'annotation' | 'export';
+type SidebarTab = 'uploadSave' | 'annotation';
 
 function FramerateInput({ value, onChange }: { value: number; onChange: (v: number) => void }) {
   const [raw, setRaw] = useState(String(value));
@@ -140,7 +145,7 @@ interface Props {
   canDeleteCurrentPoint: boolean;
   canSkipFrame: boolean;
   onSkipFrame: () => void;
-  onLoadConfiguration: (videoId: string, config: LoadedConfiguration) => void;
+  onImportProject: (entries: ImportedProjectEntry[]) => void;
 }
 
 export default function SysIdSidebar({
@@ -177,23 +182,18 @@ export default function SysIdSidebar({
   canDeleteCurrentPoint,
   canSkipFrame,
   onSkipFrame,
-  onLoadConfiguration,
+  onImportProject,
 }: Props) {
-  const [activeTab, setActiveTab] = useState<SidebarTab>('upload');
+  const [activeTab, setActiveTab] = useState<SidebarTab>('uploadSave');
   const uploadInputRef = useRef<HTMLInputElement>(null);
-  const loadInputRef = useRef<HTMLInputElement>(null);
-  const [saveName, setSaveName] = useState('');
-  const [loadTargetVideoId, setLoadTargetVideoId] = useState<string | null>(selectedId);
-
-  useEffect(() => {
-    if (selectedId && videos.some((v) => v.id === selectedId)) {
-      setLoadTargetVideoId(selectedId);
-    } else if (videos.length > 0) {
-      setLoadTargetVideoId(videos[0].id);
-    } else {
-      setLoadTargetVideoId(null);
-    }
-  }, [selectedId, videos]);
+  const importFolderInputRef = useRef<HTMLInputElement>(null);
+  const saveBusyRef = useRef(false);
+  const importBusyRef = useRef(false);
+  const importPickerOpenedRef = useRef(false);
+  const ignoreNextEmptyImportRef = useRef(false);
+  const [saving, setSaving] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [projectStatus, setProjectStatus] = useState<{ ok: boolean | null; text: string } | null>(null);
 
   const segments = selectedVideo ? buildTrajectorySegments(selectedVideo.trajectory) : [];
   const segmentAtCurrent = selectedVideo
@@ -268,41 +268,127 @@ export default function SysIdSidebar({
     }
   }
 
-  function handleSave() {
-    if (!selectedVideo) return;
-    const baseName = saveName.trim() || selectedVideo.name.replace(/\.[^.]+$/, '') + '_configuration';
-    const fileName = baseName.endsWith('.json') ? baseName : baseName + '.json';
-    const payload = videoToConfigurationSaveFile(selectedVideo);
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = fileName;
-    a.click();
-    URL.revokeObjectURL(url);
+  function handleSaveProjectClick() {
+    if (saveBusyRef.current || importBusyRef.current) return;
+    if (videos.length === 0) return;
+
+    saveBusyRef.current = true;
+    setSaving(true);
+    setProjectStatus(null);
+    try {
+      const { count } = downloadConfigFiles(videos);
+      setProjectStatus({
+        ok: true,
+        text: `Downloaded ${count} config file(s). Move them into ${PROJECT_SUBDIR}/ with your videos.`,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setProjectStatus({ ok: false, text: `Could not save configs: ${msg}` });
+    } finally {
+      saveBusyRef.current = false;
+      setSaving(false);
+    }
   }
 
-  function handleLoad(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file || !loadTargetVideoId) return;
-    e.target.value = '';
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      const text = ev.target?.result as string;
-      const config = parseConfigurationFile(text);
-      if (config) onLoadConfiguration(loadTargetVideoId, config);
-    };
-    reader.readAsText(file);
+  function handleImportProjectClick() {
+    if (importBusyRef.current || saveBusyRef.current) {
+      setProjectStatus({ ok: null, text: 'Import already in progress.' });
+      return;
+    }
+    importPickerOpenedRef.current = true;
+    importFolderInputRef.current?.click();
+  }
+
+  async function handleImportFolderSelected(e: React.ChangeEvent<HTMLInputElement>) {
+    const input = e.target;
+    const fileList = input.files;
+
+    if (!fileList || fileList.length === 0) {
+      if (ignoreNextEmptyImportRef.current) {
+        ignoreNextEmptyImportRef.current = false;
+        return;
+      }
+      if (importPickerOpenedRef.current) {
+        importPickerOpenedRef.current = false;
+        setProjectStatus({ ok: null, text: 'Import cancelled — no folder selected.' });
+      }
+      return;
+    }
+
+    if (importBusyRef.current || saveBusyRef.current) {
+      setProjectStatus({ ok: null, text: 'Import already in progress.' });
+      return;
+    }
+
+    importPickerOpenedRef.current = false;
+    const allFiles = Array.from(fileList);
+
+    importBusyRef.current = true;
+    setImporting(true);
+    setProjectStatus({ ok: null, text: `Scanning ${allFiles.length} file(s)…` });
+    try {
+      const previewResult = previewProjectFiles(allFiles);
+      if (!previewResult.ok) {
+        setProjectStatus({ ok: false, text: previewResult.message });
+        return;
+      }
+
+      const { preview, files } = previewResult;
+
+      let confirmMsg = `Import ${preview.pairs.length} video(s) and replace the current session?\n\n`;
+      for (const pair of preview.pairs) {
+        confirmMsg += `• ${pair.videoName}`;
+        confirmMsg += pair.configName ? ` + ${pair.configName}` : ' (no config)';
+        confirmMsg += '\n';
+      }
+      if (preview.orphanConfigs.length > 0) {
+        confirmMsg += `\nWarning: unmatched config file${preview.orphanConfigs.length !== 1 ? 's' : ''}: ${preview.orphanConfigs.join(', ')}\n`;
+      }
+
+      if (!window.confirm(confirmMsg)) {
+        setProjectStatus({ ok: null, text: 'Import cancelled.' });
+        return;
+      }
+
+      setProjectStatus({ ok: null, text: 'Loading project files…' });
+      const loadResult = await loadProjectEntriesFromFiles(files, preview);
+      if (!loadResult.ok) {
+        setProjectStatus({ ok: false, text: loadResult.message });
+        return;
+      }
+
+      onImportProject(loadResult.entries);
+      let text = `Imported ${loadResult.entries.length} video(s).`;
+      if (loadResult.warnings.length > 0) {
+        text += ` ${loadResult.warnings.join(' ')}`;
+      }
+      setProjectStatus({ ok: true, text });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[ProjectImport] Unexpected error:', err);
+      setProjectStatus({ ok: false, text: `Import failed: ${msg}` });
+    } finally {
+      importBusyRef.current = false;
+      setImporting(false);
+      ignoreNextEmptyImportRef.current = true;
+      input.value = '';
+    }
+  }
+
+  function videoRowStats(v: VideoData) {
+    const segs = buildTrajectorySegments(v.trajectory);
+    const trajCount = segs.length;
+    const pointCount = segs.reduce((sum, s) => sum + countPlottedPoints(s.points), 0);
+    return { trajCount, pointCount };
   }
 
   const tabs: { id: SidebarTab; label: string }[] = [
-    { id: 'upload', label: 'Video Upload' },
+    { id: 'uploadSave', label: 'Upload/Save' },
     { id: 'annotation', label: 'Trajectory Annotation' },
-    { id: 'export', label: 'Export & Import' },
   ];
 
   return (
-    <aside className={`${panelAside} border-r border-gray-700`} style={{ width }}>
+    <aside className={`${panelAside} border-r border-gray-700 flex flex-col`} style={{ width }}>
       {/* Tab bar */}
       <div className="flex-shrink-0 flex border-b border-gray-700">
         {tabs.map((t) => (
@@ -316,12 +402,11 @@ export default function SysIdSidebar({
         ))}
       </div>
 
-      <div className="flex-1 min-h-0 overflow-y-auto [direction:rtl]">
-      <div className="[direction:ltr]">
-      {/* ── Video Upload ── */}
-      {activeTab === 'upload' && (
+      <div className="flex-1 min-h-0 flex flex-col">
+      {/* ── Upload/Save ── */}
+      {activeTab === 'uploadSave' && (
         <>
-          <div className="p-4 border-b border-gray-700">
+          <div className="flex-shrink-0 p-4 border-b border-gray-700">
             <h2 className={`${panelSectionTitle} mb-3`}>Videos</h2>
             <button
               onClick={() => uploadInputRef.current?.click()}
@@ -339,43 +424,118 @@ export default function SysIdSidebar({
               onChange={handleUploadFiles}
             />
           </div>
-          <div className="p-3 space-y-1.5">
+
+          <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-1.5">
             {videos.length === 0 && (
               <p className={`${panelEmpty} mt-8 px-2`}>
                 No videos yet. Upload an iPhone video to get started.
               </p>
             )}
-            {videos.map((v) => (
-              <div
-                key={v.id}
-                onClick={() => onSelect(v.id)}
-                className={`group flex items-center gap-2.5 ${panelListItem} cursor-pointer ${
-                  v.id === selectedId
-                    ? 'bg-blue-600 text-white'
-                    : 'text-gray-300 hover:bg-gray-800 hover:text-white'
-                }`}
-              >
-                <Film size={16} className="flex-shrink-0" />
-                <span className="font-medium truncate flex-1">{v.name}</span>
-                <button
-                  onClick={(e) => { e.stopPropagation(); onDelete(v.id); }}
-                  className={`flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity rounded p-0.5 ${
-                    v.id === selectedId ? 'hover:bg-blue-400' : 'hover:bg-gray-700'
+            {videos.map((v) => {
+              const { trajCount, pointCount } = videoRowStats(v);
+              const configName = configFileNameForVideo(v.name);
+              return (
+                <div
+                  key={v.id}
+                  onClick={() => onSelect(v.id)}
+                  className={`group flex items-start gap-2.5 ${panelListItem} cursor-pointer ${
+                    v.id === selectedId
+                      ? 'bg-blue-600 text-white'
+                      : 'text-gray-300 hover:bg-gray-800 hover:text-white'
                   }`}
                 >
-                  <Trash2 size={14} />
-                </button>
-              </div>
-            ))}
+                  <Film size={16} className="flex-shrink-0 mt-0.5" />
+                  <div className="flex-1 min-w-0">
+                    <div className="font-medium truncate">{v.name}</div>
+                    <div className={`text-xs truncate mt-0.5 ${v.id === selectedId ? 'text-blue-100' : panelMeta}`}>
+                      {configName}
+                    </div>
+                    <div className={`text-xs mt-1 ${v.id === selectedId ? 'text-blue-200' : 'text-gray-500'}`}>
+                      {pointCount === 0
+                        ? 'No points'
+                        : `${trajCount} trajectory${trajCount !== 1 ? 'ies' : ''} · ${pointCount} point${pointCount !== 1 ? 's' : ''}`}
+                    </div>
+                  </div>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onDelete(v.id); }}
+                    className={`flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity rounded p-0.5 mt-0.5 ${
+                      v.id === selectedId ? 'hover:bg-blue-400' : 'hover:bg-gray-700'
+                    }`}
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="flex-shrink-0 p-4 border-t border-gray-700 space-y-2">
+            <button
+              type="button"
+              onClick={handleSaveProjectClick}
+              disabled={videos.length === 0 || saving || importing}
+              className={`w-full ${panelBtnPrimary} bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed`}
+            >
+              <Save size={14} />
+              {saving ? 'Saving…' : 'Save Configs'}
+            </button>
+            <input
+              ref={importFolderInputRef}
+              type="file"
+              // @ts-expect-error webkitdirectory is supported in Chromium; same picker path as Upload Video
+              webkitdirectory=""
+              directory=""
+              multiple
+              className="hidden"
+              onChange={handleImportFolderSelected}
+            />
+            <button
+              type="button"
+              onClick={handleImportProjectClick}
+              disabled={saving || importing}
+              className={`w-full ${panelBtnPrimary} bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed`}
+            >
+              <FolderDown size={14} />
+              {importing ? 'Importing…' : 'Import Project'}
+            </button>
+            {projectStatus && (
+              <p
+                className={`text-sm leading-snug ${
+                  projectStatus.ok === true
+                    ? 'text-green-400'
+                    : projectStatus.ok === false
+                      ? 'text-red-400'
+                      : 'text-gray-400'
+                }`}
+              >
+                {projectStatus.text}
+              </p>
+            )}
+            <div className={`${panelMeta} text-xs leading-relaxed space-y-2 pt-1`}>
+              <p>
+                <span className="text-gray-400">Save Configs</span> downloads{' '}
+                <span className={panelMono}>{'{name}_configuration.json'}</span> files to your browser downloads folder.
+                Move them into <span className={panelMono}>{PROJECT_SUBDIR}/</span> with your videos, then use Import Project.
+              </p>
+              <pre className={`${panelMono} text-gray-500 whitespace-pre-wrap`}>{`MyProject/  ← select this folder for import
+  ${PROJECT_SUBDIR}/
+    shot1.mp4
+    shot1_configuration.json
+    shot2.mov
+    shot2_configuration.json`}</pre>
+              <p>Each video pairs with <span className={panelMono}>{'{name}_configuration.json'}</span> (same basename). Videos without a config import with defaults.</p>
+            </div>
           </div>
         </>
       )}
 
       {/* ── Trajectory Annotation ── */}
       {activeTab === 'annotation' && (
-          !selectedVideo ? (
+        <div className="flex-1 min-h-0 overflow-y-auto [direction:rtl]">
+        <div className="[direction:ltr]">
+          {!selectedVideo ? (
             <p className={`${panelEmpty} mt-8 px-4 pb-8`}>
-              Select a video from the Video Upload tab to annotate trajectories.
+              Select a video from the Upload/Save tab to annotate trajectories.
             </p>
           ) : (
             <>
@@ -602,102 +762,10 @@ export default function SysIdSidebar({
                 )}
               </div>
             </>
-          )
-      )}
-
-      {/* ── Export & Import ── */}
-      {activeTab === 'export' && (
-        <div className="p-4 space-y-5">
-          {videos.length === 0 ? (
-            <p className={`${panelEmpty} mt-8 px-2`}>
-              Upload a video to save or load configuration.
-            </p>
-          ) : (
-            <>
-              {selectedVideo ? (
-                <>
-                  <div>
-                    <h2 className={`${panelItemTitle} mb-1 truncate`}>{selectedVideo.name}</h2>
-                    <p className={panelBody}>
-                      Save trajectories (including skipped frames), meterstick calibration, and per-trajectory simulation settings as JSON. Legacy v1 JSON and .txt files can still be imported.
-                    </p>
-                  </div>
-
-                  <div>
-                    <label className={panelLabel}>File name</label>
-                    <div className="flex items-center gap-1">
-                      <input
-                        type="text"
-                        value={saveName}
-                        onChange={(e) => setSaveName(e.target.value)}
-                        placeholder={`${selectedVideo.name.replace(/\.[^.]+$/, '')}_configuration`}
-                        className={`flex-1 min-w-0 ${panelInput}`}
-                      />
-                      <span className={`${panelMeta} flex-shrink-0`}>.json</span>
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={handleSave}
-                    className={`w-full ${panelBtnPrimary} bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white`}
-                  >
-                    <Save size={14} />
-                    Save Configuration
-                  </button>
-
-                  {selectedVideo.trajectory.length === 0 && (
-                    <p className={`${panelEmpty} text-gray-600`}>No points plotted yet</p>
-                  )}
-                  {segments.length > 0 && (
-                    <p className={`${panelEmpty}`}>
-                      {segments.length} trajectory{segments.length !== 1 ? 'ies' : ''} · {selectedVideo.trajectory.length} total points
-                    </p>
-                  )}
-
-                  <div className={panelDivider} />
-                </>
-              ) : (
-                <p className={panelBody}>Select a video to save configuration.</p>
-              )}
-
-              <div>
-                <label className={panelLabel} htmlFor="load-target-video">
-                  Load into video
-                </label>
-                <select
-                  id="load-target-video"
-                  value={loadTargetVideoId ?? ''}
-                  onChange={(e) => setLoadTargetVideoId(e.target.value)}
-                  className={panelInput}
-                >
-                  {videos.map((v) => (
-                    <option key={v.id} value={v.id}>
-                      {v.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <input
-                ref={loadInputRef}
-                type="file"
-                accept=".json,.txt"
-                className="hidden"
-                onChange={handleLoad}
-              />
-              <button
-                onClick={() => loadInputRef.current?.click()}
-                disabled={!loadTargetVideoId}
-                className={`w-full ${panelBtnPrimary} bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed`}
-              >
-                <Upload size={14} />
-                Load Configuration
-              </button>
-            </>
           )}
         </div>
+        </div>
       )}
-      </div>
       </div>
     </aside>
   );
