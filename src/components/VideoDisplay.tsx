@@ -1,17 +1,20 @@
 import { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { VideoData, TrajectoryPoint, Meterstick } from '../types';
-import { simulateShot, gravityCorrectedPoints } from '../simulation';
-import { buildTrajectorySegments, activeSegmentAtFrame, firstTrajectoryPoint } from '../utils/trajectorySegments';
+import { simulateShot, gravityCorrectedPoints, interpSimAtTime, SIM_MAX_TIME, SIM_DT } from '../simulation';
+import { buildTrajectorySegments, activeSegmentAtFrame, resolveActiveSegment, firstTrajectoryPoint, averageTrajectoryFromSegments, getLaunchParams, plottedPathSegments, plottedPoints, isSkippedPoint } from '../utils/trajectorySegments';
 
 interface Props {
   video: VideoData;
   onTrajectoryUpdate: (points: TrajectoryPoint[]) => void;
   onMetastickUpdate: (m: Meterstick) => void;
+  meterstickClipboardRef: React.MutableRefObject<Meterstick | null>;
   onFrameChange: (frame: number) => void;
   onTotalFramesChange: (total: number) => void;
   plottingMode: boolean;
   showAllTrajectories: boolean;
+  showAverageTrajectory: boolean;
+  showTrajectoryPoints: boolean;
   focusedTrajectoryId: string | null;
   onPushUndo: (current: TrajectoryPoint[]) => void;
   onUndo: () => void;
@@ -42,6 +45,13 @@ function hexToRgba(hex: string, alpha: number): string {
   return `rgba(${r},${g},${b},${alpha})`;
 }
 
+function darkenHex(hex: string, factor: number): string {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgb(${Math.round(r * factor)}, ${Math.round(g * factor)}, ${Math.round(b * factor)})`;
+}
+
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 4;
 const ZOOM_WHEEL_FACTOR = 1.1;
@@ -64,10 +74,13 @@ export default function VideoDisplay({
   video,
   onTrajectoryUpdate,
   onMetastickUpdate,
+  meterstickClipboardRef,
   onFrameChange,
   onTotalFramesChange,
   plottingMode,
   showAllTrajectories,
+  showAverageTrajectory,
+  showTrajectoryPoints,
   focusedTrajectoryId,
   onPushUndo,
   onUndo,
@@ -85,6 +98,7 @@ export default function VideoDisplay({
   const [fps] = useState(30);
   const [hoveredZone, setHoveredZone] = useState<null | 'left' | 'right' | 'body'>(null);
   const [draggingZone, setDraggingZone] = useState<null | 'left' | 'right' | 'body'>(null);
+  const [stickSelected, setStickSelected] = useState(false);
   const dragStartRef = useRef<{ mx: number; my: number; stickSnap: Meterstick } | null>(null);
   const scrubTrackRef = useRef<HTMLDivElement>(null);
   const totalFramesRef = useRef(1);
@@ -101,20 +115,26 @@ export default function VideoDisplay({
 
   const visibleSegments = useMemo(() => {
     if (showAllTrajectories) return segments;
-    const active =
-      activeSegmentAtFrame(segments, video.currentFrame) ??
-      segments.find((s) => s.id === focusedTrajectoryId) ??
-      null;
+    const active = resolveActiveSegment(segments, video.currentFrame, focusedTrajectoryId);
     return active ? [active] : [];
   }, [segments, showAllTrajectories, video.currentFrame, focusedTrajectoryId]);
 
-  const simulationPoints = useMemo(() => {
-    const atFrame = activeSegmentAtFrame(segments, video.currentFrame);
-    if (atFrame) return atFrame.points;
-    const focused = segments.find((s) => s.id === focusedTrajectoryId);
-    if (focused) return focused.points;
-    return [];
-  }, [segments, video.currentFrame, focusedTrajectoryId]);
+  const averagePoints = useMemo(() => {
+    if (!showAverageTrajectory) return [];
+    return averageTrajectoryFromSegments(segments, video.framerate);
+  }, [showAverageTrajectory, segments, video.framerate]);
+
+  const activeSegment = useMemo(
+    () => resolveActiveSegment(segments, video.currentFrame, focusedTrajectoryId),
+    [segments, video.currentFrame, focusedTrajectoryId]
+  );
+
+  const simulationPoints = useMemo(() => activeSegment?.points ?? [], [activeSegment]);
+
+  const launchParams = useMemo(
+    () => getLaunchParams(video.trajectoryLaunchParams, activeSegment?.id ?? null),
+    [video.trajectoryLaunchParams, activeSegment]
+  );
 
   const launchPoint = useMemo(
     () => firstTrajectoryPoint(simulationPoints),
@@ -131,6 +151,7 @@ export default function VideoDisplay({
     panRef.current = { x: 0, y: 0 };
     setZoom(1);
     setPan({ x: 0, y: 0 });
+    setStickSelected(false);
   }, [video.id]);
 
   useEffect(() => {
@@ -256,7 +277,10 @@ export default function VideoDisplay({
   function handleCanvasClick(e: React.MouseEvent) {
     if (draggingZone) return;
     const pos = clientToCanvas(e.clientX, e.clientY);
-    if (!plottingMode) return;
+    if (!plottingMode) {
+      setStickSelected(hitStick(pos.x, pos.y) !== null);
+      return;
+    }
     onPushUndo(video.trajectory);
     const newPt: TrajectoryPoint = { x: pos.x, y: pos.y, frame: video.currentFrame };
     const updated = [...video.trajectory.filter((p) => p.frame !== video.currentFrame), newPt]
@@ -280,6 +304,7 @@ export default function VideoDisplay({
     const zone = hitStick(pos.x, pos.y);
     if (!zone) return;
     e.preventDefault();
+    setStickSelected(true);
     setDraggingZone(zone);
     dragStartRef.current = { mx: pos.x, my: pos.y, stickSnap: { ...video.meterstick } };
   }
@@ -315,6 +340,24 @@ export default function VideoDisplay({
     };
   }, [handleWindowMouseMove, handleWindowMouseUp]);
 
+  const fineAdjustCurrentPoint = useCallback(
+    (dxCm: number, dyCm: number, pushUndo: boolean) => {
+      const ppm = video.meterstick.length;
+      if (ppm <= 0) return;
+      const pt = video.trajectory.find((p) => p.frame === video.currentFrame);
+      if (!pt || pt.skipped) return;
+      const pxPerMm = ppm / 1000;
+      if (pushUndo) onPushUndo(video.trajectory);
+      const updated = video.trajectory.map((p) =>
+        p.frame === video.currentFrame
+          ? { ...p, x: p.x + dxCm * pxPerMm, y: p.y + dyCm * pxPerMm }
+          : p
+      );
+      onTrajectoryUpdate(updated);
+    },
+    [video, onPushUndo, onTrajectoryUpdate]
+  );
+
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       const tag = (e.target as HTMLElement).tagName;
@@ -324,10 +367,28 @@ export default function VideoDisplay({
       if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) { e.preventDefault(); onUndo(); }
       if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); onRedo(); }
       if (e.key === 'Delete') { e.preventDefault(); onDeleteCurrentPoint(); }
+      const key = e.key.toLowerCase();
+      if (key === 'w' || key === 'a' || key === 's' || key === 'd') {
+        const dxCm = key === 'a' ? -1 : key === 'd' ? 1 : 0;
+        const dyCm = key === 'w' ? -1 : key === 's' ? 1 : 0;
+        if (dxCm !== 0 || dyCm !== 0) {
+          e.preventDefault();
+          fineAdjustCurrentPoint(dxCm, dyCm, !e.repeat);
+        }
+      }
+      if ((e.ctrlKey || e.metaKey) && key === 'c' && stickSelected) {
+        e.preventDefault();
+        meterstickClipboardRef.current = { ...video.meterstick };
+      }
+      if ((e.ctrlKey || e.metaKey) && key === 'v' && meterstickClipboardRef.current) {
+        e.preventDefault();
+        onMetastickUpdate({ ...meterstickClipboardRef.current });
+        setStickSelected(true);
+      }
     }
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [onStepFrame, onUndo, onRedo, onDeleteCurrentPoint]);
+  }, [onStepFrame, onUndo, onRedo, onDeleteCurrentPoint, fineAdjustCurrentPoint, stickSelected, video.meterstick, meterstickClipboardRef, onMetastickUpdate]);
 
   const drawRef = useRef<() => void>(() => {});
 
@@ -345,26 +406,38 @@ export default function VideoDisplay({
 
     for (const seg of visibleSegments) {
       const sorted = [...seg.points].sort((a, b) => a.frame - b.frame);
-      if (sorted.length >= 2) {
-        ctx.beginPath();
-        sorted.forEach((pt, i) => { if (i === 0) ctx.moveTo(pt.x, pt.y); else ctx.lineTo(pt.x, pt.y); });
-        ctx.strokeStyle = hexToRgba(seg.color, 0.75);
-        ctx.lineWidth = 2;
-        ctx.stroke();
+      for (const run of plottedPathSegments(sorted)) {
+        if (run.length >= 2) {
+          ctx.beginPath();
+          run.forEach((pt, i) => { if (i === 0) ctx.moveTo(pt.x, pt.y); else ctx.lineTo(pt.x, pt.y); });
+          ctx.strokeStyle = hexToRgba(seg.color, 0.75);
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
       }
       sorted.forEach((pt) => {
+        if (isSkippedPoint(pt)) return;
         const isActive = pt.frame === video.currentFrame;
+        if (!showTrajectoryPoints && !(plottingMode && isActive)) return;
+        const r = isActive ? 11 : 5;
         ctx.beginPath();
-        ctx.arc(pt.x, pt.y, isActive ? 9 : 5, 0, Math.PI * 2);
+        ctx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
         ctx.fillStyle = seg.color;
         ctx.fill();
         ctx.strokeStyle = 'white';
-        ctx.lineWidth = 1.5;
+        ctx.lineWidth = isActive ? 2 : 1.5;
         ctx.stroke();
+        if (isActive) {
+          ctx.beginPath();
+          ctx.arc(pt.x, pt.y, 2.5, 0, Math.PI * 2);
+          ctx.fillStyle = 'white';
+          ctx.fill();
+        }
       });
 
-      if (ppm > 0 && video.framerate > 0 && sorted.length >= 2) {
-        const subset = sorted.slice(0, Math.min(numPointsForEstimate, sorted.length));
+      const plottedSorted = plottedPoints(sorted);
+      if (ppm > 0 && video.framerate > 0 && plottedSorted.length >= 2) {
+        const subset = plottedSorted.slice(0, Math.min(numPointsForEstimate, plottedSorted.length));
         const corrected = gravityCorrectedPoints(subset, ppm, video.framerate);
         if (corrected.length >= 2) {
           ctx.beginPath();
@@ -375,22 +448,43 @@ export default function VideoDisplay({
           ctx.stroke();
           ctx.setLineDash([]);
         }
-        corrected.forEach((pt) => {
-          ctx.beginPath();
-          ctx.arc(pt.x, pt.y, 4, 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(156, 163, 175, 0.85)';
-          ctx.fill();
-          ctx.strokeStyle = 'rgba(75, 85, 99, 0.9)';
-          ctx.lineWidth = 1;
-          ctx.stroke();
-        });
+        if (showTrajectoryPoints) {
+          corrected.forEach((pt) => {
+            ctx.beginPath();
+            ctx.arc(pt.x, pt.y, 4, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(156, 163, 175, 0.85)';
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(75, 85, 99, 0.9)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+          });
+        }
       }
     }
 
-    const { exitVelocity, exitAngle, dragCoefficient, magnusGain } = video.simulationParams;
+    if (averagePoints.length >= 2) {
+      ctx.beginPath();
+      averagePoints.forEach((pt, i) => {
+        if (i === 0) ctx.moveTo(pt.x, pt.y);
+        else ctx.lineTo(pt.x, pt.y);
+      });
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+    }
+
+    const { exitVelocity, exitAngle, dragCoefficient, magnusGain, magnusPower } = launchParams;
 
     if (video.showSimulation && ppm > 0 && launchPoint) {
-      const simPts = simulateShot(exitVelocity, exitAngle, dragCoefficient, magnusGain);
+      const simPts = simulateShot(
+        exitVelocity,
+        exitAngle,
+        dragCoefficient,
+        magnusGain,
+        SIM_MAX_TIME,
+        SIM_DT,
+        magnusPower ?? 2
+      );
       ctx.beginPath();
       simPts.forEach((sp, i) => {
         const cx = launchPoint.x + sp.x * ppm;
@@ -402,30 +496,57 @@ export default function VideoDisplay({
       ctx.setLineDash([8, 4]);
       ctx.stroke();
       ctx.setLineDash([]);
+
+      if (video.framerate > 0) {
+        const t = (video.currentFrame - launchPoint.frame) / video.framerate;
+        const pos = interpSimAtTime(simPts, t, SIM_DT);
+        if (pos) {
+          const mx = launchPoint.x + pos.x * ppm;
+          const my = launchPoint.y - pos.y * ppm;
+          ctx.beginPath();
+          ctx.arc(mx, my, 10, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(34,197,94,0.95)';
+          ctx.fill();
+          ctx.strokeStyle = 'black';
+          ctx.lineWidth = 2.5;
+          ctx.stroke();
+        }
+      }
     }
 
     const s = video.meterstick;
     const rx = s.x + s.length;
     const isHovered = hoveredZone !== null || draggingZone !== null;
+    const stickColor = stickSelected ? '#fef08a' : isHovered ? '#fde68a' : '#fbbf24';
+    const stickWidth = stickSelected || isHovered ? 4 : 3;
+    if (stickSelected) {
+      ctx.beginPath();
+      ctx.rect(s.x - 6, s.y - 16, s.length + 12, 32);
+      ctx.strokeStyle = 'rgba(254, 240, 138, 0.45)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
     ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(rx, s.y);
-    ctx.strokeStyle = isHovered ? '#fde68a' : '#fbbf24';
-    ctx.lineWidth = isHovered ? 4 : 3; ctx.stroke();
+    ctx.strokeStyle = stickColor;
+    ctx.lineWidth = stickWidth; ctx.stroke();
     const capH = 18;
     [s.x, rx].forEach((ex) => {
       ctx.beginPath(); ctx.arc(ex, s.y, 7, 0, Math.PI * 2);
-      ctx.fillStyle = isHovered ? '#fde68a' : '#fbbf24'; ctx.fill();
+      ctx.fillStyle = stickColor; ctx.fill();
       ctx.strokeStyle = 'white'; ctx.lineWidth = 1.5; ctx.stroke();
       ctx.beginPath(); ctx.moveTo(ex, s.y - capH / 2); ctx.lineTo(ex, s.y + capH / 2);
-      ctx.strokeStyle = isHovered ? '#fde68a' : '#fbbf24';
-      ctx.lineWidth = isHovered ? 4 : 3; ctx.stroke();
+      ctx.strokeStyle = stickColor;
+      ctx.lineWidth = stickWidth; ctx.stroke();
     });
     ctx.font = 'bold 13px system-ui, sans-serif';
-    ctx.fillStyle = isHovered ? '#fde68a' : '#fbbf24';
+    ctx.fillStyle = stickColor;
     ctx.textAlign = 'center';
     ctx.shadowColor = 'rgba(0,0,0,0.8)'; ctx.shadowBlur = 3;
     ctx.fillText('1 m', s.x + s.length / 2, s.y - 12);
     ctx.shadowBlur = 0;
-  }, [video, hoveredZone, draggingZone, visibleSegments, launchPoint]);
+  }, [video, hoveredZone, draggingZone, stickSelected, visibleSegments, averagePoints, showTrajectoryPoints, plottingMode, launchPoint, launchParams]);
 
   useEffect(() => { drawRef.current = draw; draw(); }, [draw]);
 
@@ -493,6 +614,26 @@ export default function VideoDisplay({
                 />
               );
             })}
+            {segments.flatMap((seg) =>
+              seg.points.filter(isSkippedPoint).map((pt) => {
+                const { left, width } = scrubSegmentStyle(pt.frame, pt.frame, totalFrames);
+                const isActive = activeScrubSegment?.id === seg.id;
+                return (
+                  <div
+                    key={`${seg.id}-skip-${pt.frame}`}
+                    className="absolute top-0 h-full pointer-events-none"
+                    style={{
+                      left,
+                      width,
+                      backgroundColor: darkenHex(seg.color, 0.45),
+                      opacity: isActive ? 1 : 0.9,
+                      zIndex: 1,
+                    }}
+                    title={`${seg.name} · frame ${pt.frame + 1} skipped`}
+                  />
+                );
+              })
+            )}
           </div>
           <div
             className="absolute top-1/2 -translate-y-1/2 w-3.5 h-3.5 bg-white rounded-full shadow-md border-2 border-gray-900 -translate-x-1/2 z-10 pointer-events-none"
@@ -511,6 +652,9 @@ export default function VideoDisplay({
           </button>
           <span className="text-xs text-gray-400 font-mono tabular-nums min-w-[7rem] text-center">
             Frame {video.currentFrame + 1} / {totalFrames}
+            {video.trajectory.some((p) => p.frame === video.currentFrame && p.skipped) && (
+              <span className="text-gray-500 ml-1">· skipped</span>
+            )}
           </span>
           <button
             onMouseDown={(e) => { e.preventDefault(); onStartFrameHold(1); }}

@@ -2,6 +2,8 @@ export interface TrajectoryPoint {
   x: number;
   y: number;
   frame: number;
+  /** Frame labeled with no position (ball off-screen); keeps time continuity in the trajectory. */
+  skipped?: boolean;
 }
 
 export interface Meterstick {
@@ -10,11 +12,12 @@ export interface Meterstick {
   length: number; // pixel length representing 1 meter
 }
 
-export interface SimulationParams {
+export interface LaunchParams {
   exitVelocity: number; // m/s
   exitAngle: number; // degrees from horizontal
   dragCoefficient: number;
-  magnusGain: number; // upward accel = magnusGain * speed (m/s²·s/m)
+  magnusGain: number; // upward accel = magnusGain * speed^magnusPower
+  magnusPower: number; // exponent on speed for Magnus force
 }
 
 export interface VideoData {
@@ -23,7 +26,7 @@ export interface VideoData {
   url: string;
   trajectory: TrajectoryPoint[];
   meterstick: Meterstick;
-  simulationParams: SimulationParams;
+  trajectoryLaunchParams: Record<string, LaunchParams>;
   showSimulation: boolean;
   currentFrame: number;
   framerate: number; // video fps for empirical velocity calculations
@@ -71,4 +74,5 @@ export interface TrajGenParams {
   refineThreshold: number; // meters RMSE
   dragCoefficient: number;
   magnusGain: number;
+  magnusPower: number;
 }

@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
-import { VideoData, TrajectoryPoint, Meterstick, SimulationParams, GeneratedTrajectory, TrajGenParams, TrajGroup } from './types';
+import { VideoData, TrajectoryPoint, Meterstick, LaunchParams, GeneratedTrajectory, TrajGenParams, TrajGroup } from './types';
 import SysIdSidebar from './components/SysIdSidebar';
 import VideoDisplay from './components/VideoDisplay';
 import SimulationControls from './components/SimulationControls';
@@ -8,7 +8,7 @@ import TrajectoryGenCanvas from './components/TrajectoryGenCanvas';
 import TrajectoryGenLeft from './components/TrajectoryGenLeft';
 import TrajectoryGenRight from './components/TrajectoryGenRight';
 import { generateTrajectories, refineGroupTrajectories } from './simulation';
-import { buildTrajectorySegments, activeSegmentAtFrame } from './utils/trajectorySegments';
+import { buildTrajectorySegments, resolveActiveSegment, getLaunchParams, createSkippedPoint, type LoadedConfiguration } from './utils/trajectorySegments';
 
 const LEFT_MIN = 160;
 const LEFT_MAX = 480;
@@ -29,7 +29,7 @@ function makeDefaultVideo(id: string, name: string, url: string): VideoData {
     url,
     trajectory: [],
     meterstick: { x: 80, y: 680, length: 160 },
-    simulationParams: { exitVelocity: 8, exitAngle: 45, dragCoefficient: 0.01, magnusGain: 0 },
+    trajectoryLaunchParams: {},
     showSimulation: false,
     currentFrame: 0,
     framerate: 30,
@@ -56,6 +56,7 @@ const DEFAULT_TRAJGEN_PARAMS: TrajGenParams = {
   refineThreshold: 0.001,
   dragCoefficient: 0.01,
   magnusGain: 0,
+  magnusPower: 2,
 };
 
 function ResizeHandle({ onMouseDown }: { onMouseDown: (e: React.MouseEvent) => void }) {
@@ -85,10 +86,13 @@ export default function App() {
   // Trajectory annotation UI state (sysid)
   const [plottingMode, setPlottingMode] = useState(false);
   const [showAllTrajectories, setShowAllTrajectories] = useState(true);
+  const [showAverageTrajectory, setShowAverageTrajectory] = useState(false);
+  const [showTrajectoryPoints, setShowTrajectoryPoints] = useState(true);
   const [focusedTrajectoryId, setFocusedTrajectoryId] = useState<string | null>(null);
   const [totalFrames, setTotalFrames] = useState(1);
   const undoStack = useRef<TrajectoryPoint[][]>([]);
   const redoStack = useRef<TrajectoryPoint[][]>([]);
+  const meterstickClipboardRef = useRef<Meterstick | null>(null);
   const frameHoldRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const currentFrameRef = useRef(0);
   const totalFramesRef = useRef(1);
@@ -149,14 +153,12 @@ export default function App() {
     [selectedVideo]
   );
 
-  const activeTrajectoryPoints = useMemo(() => {
-    if (!selectedVideo) return [];
-    const atFrame = activeSegmentAtFrame(trajectorySegments, selectedVideo.currentFrame);
-    if (atFrame) return atFrame.points;
-    const focused = trajectorySegments.find((s) => s.id === focusedTrajectoryId);
-    if (focused) return focused.points;
-    return [];
+  const activeSegment = useMemo(() => {
+    if (!selectedVideo) return null;
+    return resolveActiveSegment(trajectorySegments, selectedVideo.currentFrame, focusedTrajectoryId);
   }, [selectedVideo, trajectorySegments, focusedTrajectoryId]);
+
+  const activeTrajectoryPoints = useMemo(() => activeSegment?.points ?? [], [activeSegment]);
 
   useEffect(() => {
     undoStack.current = [];
@@ -227,6 +229,19 @@ export default function App() {
     bumpHistory();
   }, [selectedVideo, handleTrajectoryUpdate]);
 
+  const handleSkipFrame = useCallback(() => {
+    if (!selectedVideo || !selectedId) return;
+    const current = selectedVideo.currentFrame;
+    if (current >= totalFramesRef.current - 1) return;
+    pushUndo(selectedVideo.trajectory);
+    const skipPt = createSkippedPoint(current);
+    const updated = [
+      ...selectedVideo.trajectory.filter((p) => p.frame !== current),
+      skipPt,
+    ].sort((a, b) => a.frame - b.frame);
+    updateVideo(selectedId, { trajectory: updated, currentFrame: current + 1 });
+  }, [selectedVideo, selectedId, pushUndo]);
+
   const handleDeleteCurrentPoint = useCallback(() => {
     if (!selectedVideo) return;
     const hasPoint = selectedVideo.trajectory.some((p) => p.frame === selectedVideo.currentFrame);
@@ -242,12 +257,15 @@ export default function App() {
     setFocusedTrajectoryId(null);
   }, [selectedVideo, pushUndo, handleTrajectoryUpdate]);
 
-  const handleLoadTrajectory = useCallback(
-    (videoId: string, points: TrajectoryPoint[]) => {
+  const handleLoadConfiguration = useCallback(
+    (videoId: string, config: LoadedConfiguration) => {
       const video = videos.find((v) => v.id === videoId);
       if (!video) return;
       if (videoId === selectedId) pushUndo(video.trajectory);
-      updateVideo(videoId, { trajectory: points });
+      const patch: Partial<VideoData> = { trajectory: config.points };
+      if (config.meterstick) patch.meterstick = config.meterstick;
+      if (config.trajectoryLaunchParams) patch.trajectoryLaunchParams = config.trajectoryLaunchParams;
+      updateVideo(videoId, patch);
       setSelectedId(videoId);
       setFocusedTrajectoryId(null);
     },
@@ -285,6 +303,9 @@ export default function App() {
   const canDeleteCurrentPoint = selectedVideo
     ? selectedVideo.trajectory.some((p) => p.frame === selectedVideo.currentFrame)
     : false;
+  const canSkipFrame = selectedVideo
+    ? selectedVideo.currentFrame < totalFrames - 1
+    : false;
 
   const handleMetastickUpdate = useCallback(
     (m: Meterstick) => {
@@ -304,12 +325,17 @@ export default function App() {
     [selectedId]
   );
 
-  const handleSimParamsChange = useCallback(
-    (p: SimulationParams) => {
+  const handleLaunchParamsChange = useCallback(
+    (trajectoryId: string, p: LaunchParams) => {
       if (!selectedId) return;
-      updateVideo(selectedId, { simulationParams: p });
+      setVideos((prev) =>
+        prev.map((v) =>
+          v.id === selectedId
+            ? { ...v, trajectoryLaunchParams: { ...(v.trajectoryLaunchParams ?? {}), [trajectoryId]: p } }
+            : v
+        )
+      );
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [selectedId]
   );
 
@@ -439,7 +465,7 @@ export default function App() {
           <>
             {/* ── LEFT PANEL ── */}
             <div
-              className={`flex-shrink-0 overflow-hidden ${isDragging ? '' : 'transition-[width] duration-200'}`}
+              className={`flex-shrink-0 h-full overflow-hidden ${isDragging ? '' : 'transition-[width] duration-200'}`}
               style={{ width: leftOpen ? leftWidth : 0 }}
             >
               <SysIdSidebar
@@ -454,6 +480,10 @@ export default function App() {
                 onPlottingModeChange={setPlottingMode}
                 showAllTrajectories={showAllTrajectories}
                 onShowAllTrajectoriesChange={setShowAllTrajectories}
+                showAverageTrajectory={showAverageTrajectory}
+                onShowAverageTrajectoryChange={setShowAverageTrajectory}
+                showTrajectoryPoints={showTrajectoryPoints}
+                onShowTrajectoryPointsChange={setShowTrajectoryPoints}
                 focusedTrajectoryId={focusedTrajectoryId}
                 onFocusedTrajectoryChange={setFocusedTrajectoryId}
                 onTrajectoryUpdate={(points) => { pushUndo(selectedVideo?.trajectory ?? []); handleTrajectoryUpdate(points); }}
@@ -470,7 +500,9 @@ export default function App() {
                 onDeleteCurrentPoint={handleDeleteCurrentPoint}
                 onClearAllPoints={handleClearAllPoints}
                 canDeleteCurrentPoint={canDeleteCurrentPoint}
-                onLoadTrajectory={handleLoadTrajectory}
+                canSkipFrame={canSkipFrame}
+                onSkipFrame={handleSkipFrame}
+                onLoadConfiguration={handleLoadConfiguration}
               />
             </div>
 
@@ -501,10 +533,13 @@ export default function App() {
                   video={selectedVideo}
                   onTrajectoryUpdate={handleTrajectoryUpdate}
                   onMetastickUpdate={handleMetastickUpdate}
+                  meterstickClipboardRef={meterstickClipboardRef}
                   onFrameChange={handleFrameChange}
                   onTotalFramesChange={setTotalFrames}
                   plottingMode={plottingMode}
                   showAllTrajectories={showAllTrajectories}
+                  showAverageTrajectory={showAverageTrajectory}
+                  showTrajectoryPoints={showTrajectoryPoints}
                   focusedTrajectoryId={focusedTrajectoryId}
                   onPushUndo={pushUndo}
                   onUndo={handleUndo}
@@ -565,12 +600,22 @@ export default function App() {
             >
               {selectedVideo && (
                 <SimulationControls
-                  params={selectedVideo.simulationParams}
+                  launchParams={getLaunchParams(selectedVideo.trajectoryLaunchParams, activeSegment?.id ?? null)}
+                  activeTrajectoryId={activeSegment?.id ?? null}
+                  activeTrajectoryName={activeSegment?.name ?? null}
                   showSimulation={selectedVideo.showSimulation}
                   trajectory={activeTrajectoryPoints}
+                  allTrajectories={trajectorySegments.map((seg) => ({
+                    id: seg.id,
+                    points: seg.points,
+                    launchParams: getLaunchParams(selectedVideo.trajectoryLaunchParams, seg.id),
+                  }))}
                   meterstick={selectedVideo.meterstick}
                   framerate={selectedVideo.framerate}
-                  onChange={handleSimParamsChange}
+                  onLaunchParamsChange={(p) => {
+                    if (activeSegment) handleLaunchParamsChange(activeSegment.id, p);
+                  }}
+                  onLaunchParamsChangeForTrajectory={handleLaunchParamsChange}
                   onToggleShow={handleToggleSimulation}
                   width={rightWidth}
                 />

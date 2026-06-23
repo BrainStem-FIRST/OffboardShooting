@@ -1,4 +1,5 @@
 import type { GeneratedTrajectory, TrajGenParams, TrajectoryPoint, TrajGroup } from './types';
+import { isPlottedPoint, plottedPoints } from './utils/trajectorySegments';
 
 export interface SimPoint {
   x: number; // meters from launch
@@ -12,6 +13,7 @@ export function speedBetweenPoints(
   pixelsPerMeter: number,
   framerate: number
 ): number | null {
+  if (!isPlottedPoint(p1) || !isPlottedPoint(p2)) return null;
   if (pixelsPerMeter <= 0 || framerate <= 0) return null;
   const frameDelta = p2.frame - p1.frame;
   if (frameDelta <= 0) return null;
@@ -29,6 +31,7 @@ export function angleBetweenPoints(
   p2: TrajectoryPoint,
   pixelsPerMeter: number
 ): number | null {
+  if (!isPlottedPoint(p1) || !isPlottedPoint(p2)) return null;
   if (pixelsPerMeter <= 0) return null;
   if (p2.frame - p1.frame <= 0) return null;
   const physDx = (p2.x - p1.x) / pixelsPerMeter;
@@ -37,6 +40,10 @@ export function angleBetweenPoints(
 }
 
 export const GRAVITY_MS2 = 9.81;
+/** Max simulated flight time (seconds) for integrate-until-land or range checks. */
+export const SIM_MAX_TIME = 10;
+/** Fixed physics timestep (seconds); must match across simulateShot and fit. */
+export const SIM_DT = 0.005;
 
 /**
  * Shift each point upward by ½g·t² (t = elapsed time from the first point) to undo
@@ -47,8 +54,9 @@ export function gravityCorrectedPoints(
   pixelsPerMeter: number,
   framerate: number
 ): TrajectoryPoint[] {
-  if (points.length === 0 || pixelsPerMeter <= 0 || framerate <= 0) return [];
-  const sorted = [...points].sort((a, b) => a.frame - b.frame);
+  const plotted = plottedPoints(points);
+  if (plotted.length === 0 || pixelsPerMeter <= 0 || framerate <= 0) return [];
+  const sorted = [...plotted].sort((a, b) => a.frame - b.frame);
   const frame0 = sorted[0].frame;
   return sorted.map((pt, i) => {
     if (i === 0) return { ...pt };
@@ -147,7 +155,7 @@ export function gravityCorrectionQuality(
   framerate: number,
   numPoints: number
 ): GravityCorrectionQuality {
-  const sorted = [...points].sort((a, b) => a.frame - b.frame);
+  const sorted = plottedPoints(points).sort((a, b) => a.frame - b.frame);
   const n = Math.max(2, Math.floor(numPoints));
   if (sorted.length < n || pixelsPerMeter <= 0 || framerate <= 0) {
     return { r2: null, avgRadiusOfCurvature: null };
@@ -179,7 +187,7 @@ export function empiricalFromPoints(
   framerate: number,
   numPoints: number
 ): { speed: number | null; angle: number | null } {
-  const sorted = [...points].sort((a, b) => a.frame - b.frame);
+  const sorted = plottedPoints(points).sort((a, b) => a.frame - b.frame);
   const n = Math.max(2, Math.floor(numPoints));
   if (sorted.length < n) return { speed: null, angle: null };
 
@@ -213,17 +221,18 @@ export function empiricalFromPoints(
   };
 }
 
-// Simulate projectile with drag (F = b * v^2) and Magnus lift (ay += magnusGain * v, upward)
+// Simulate projectile with drag (F = b * v^2) and Magnus (ay += magnusGain * v^magnusPower, upward)
 // Returns array of (x, y) in meters
 export function simulateShot(
   exitVelocity: number,
   exitAngleDeg: number,
   dragCoefficient: number,
   magnusGain = 0,
-  maxTime = 10,
-  dt = 0.005
+  maxTime = SIM_MAX_TIME,
+  dt = SIM_DT,
+  magnusPower = 2
 ): SimPoint[] {
-  const g = 9.81;
+  const g = GRAVITY_MS2;
   const angleRad = (exitAngleDeg * Math.PI) / 180;
 
   let vx = exitVelocity * Math.cos(angleRad);
@@ -236,8 +245,9 @@ export function simulateShot(
   for (let t = 0; t < maxTime; t += dt) {
     const v = Math.sqrt(vx * vx + vy * vy);
     const dragMag = dragCoefficient * v * v;
-    const ax = -(dragMag * (vx / v));
-    const ay = -g - dragMag * (vy / v) + magnusGain * v;
+    const magnusMag = v > 0 ? magnusGain * v ** magnusPower : 0;
+    const ax = v > 0 ? -(dragMag * (vx / v)) : 0;
+    const ay = -g - (v > 0 ? dragMag * (vy / v) : 0) + magnusMag;
 
     vx += ax * dt;
     vy += ay * dt;
@@ -254,7 +264,7 @@ export function simulateShot(
 
 // Interpolate (x, y) from a fixed-dt simulation at time t (seconds).
 // simPts[k] corresponds to t = k * dt. Returns null if t is past the flight.
-function interpAtTime(simPts: SimPoint[], t: number, dt: number): SimPoint | null {
+export function interpSimAtTime(simPts: SimPoint[], t: number, dt = SIM_DT): SimPoint | null {
   if (t < 0) return null;
   const idx = t / dt;
   const i = Math.floor(idx);
@@ -267,147 +277,565 @@ function interpAtTime(simPts: SimPoint[], t: number, dt: number): SimPoint | nul
   return { x: a.x + frac * (b.x - a.x), y: a.y + frac * (b.y - a.y) };
 }
 
-// Golden-section search: returns the scalar in [lo, hi] minimizing a unimodal f.
-function goldenSection(
-  f: (x: number) => number,
-  lo: number,
-  hi: number,
-  tol = 1e-5
-): number {
-  const invphi = (Math.sqrt(5) - 1) / 2; // 1/phi
-  let a = lo;
-  let b = hi;
-  let c = b - invphi * (b - a);
-  let d = a + invphi * (b - a);
-  let fc = f(c);
-  let fd = f(d);
-  while (b - a > tol) {
-    if (fc < fd) {
-      b = d;
-      d = c;
-      fd = fc;
-      c = b - invphi * (b - a);
-      fc = f(c);
-    } else {
-      a = c;
-      c = d;
-      fc = fd;
-      d = a + invphi * (b - a);
-      fd = f(d);
-    }
-  }
-  return (a + b) / 2;
+export interface FitTargetParams {
+  fitExitVelocity: boolean;
+  fitExitAngle: boolean;
+  fitDrag: boolean;
+  fitMagnus: boolean;
+  fitMagnusPower: boolean;
 }
 
-export interface DragMagnusFitResult {
+export const DEFAULT_FIT_TARGET_PARAMS: FitTargetParams = {
+  fitExitVelocity: false,
+  fitExitAngle: false,
+  fitDrag: true,
+  fitMagnus: true,
+  fitMagnusPower: false,
+};
+
+export interface FitGridConfig {
+  dragMin: number;
+  dragMax: number;
+  magnusMin: number;
+  magnusMax: number;
+  magnusPowerMin: number;
+  magnusPowerMax: number;
+  velocityMin: number;
+  velocityMax: number;
+  angleMin: number;
+  angleMax: number;
+  numSplits: number;
+  numRecursions: number;
+  fitTargets: FitTargetParams;
+  fitAll: boolean;
+}
+
+export const DEFAULT_FIT_GRID_CONFIG: FitGridConfig = {
+  dragMin: 0,
+  dragMax: 0.2,
+  magnusMin: -0.5,
+  magnusMax: 0.5,
+  magnusPowerMin: 1,
+  magnusPowerMax: 3,
+  velocityMin: 0,
+  velocityMax: 30,
+  angleMin: -90,
+  angleMax: 90,
+  numSplits: 8,
+  numRecursions: 3,
+  fitTargets: DEFAULT_FIT_TARGET_PARAMS,
+  fitAll: false,
+};
+
+export interface FitProgress {
+  recursion: number;
+  numRecursions: number;
+  iteration: number;
+  gridSize: number;
+  totalEvals: number;
+  progress: number;
+}
+
+export interface TrajectoryFitResult {
+  exitVelocity: number;
+  exitAngle: number;
   dragCoefficient: number;
   magnusGain: number;
-  rmse: number; // meters (RMS 2D position error)
+  magnusPower: number;
+  meanDistance: number;
+  rmse: number;
 }
 
-// Search bounds mirror the UI sliders; SIM_DT must match simulateShot's default.
-const DRAG_MAX = 1;
-const MAGNUS_MAX = 2;
-const SIM_DT = 0.005;
+/** @deprecated Use TrajectoryFitResult */
+export type DragMagnusFitResult = TrajectoryFitResult;
 
-// Physics-informed, time-aware fit for drag & Magnus only. Exit velocity and
-// angle are treated as fixed ground truth.
-//
-// The model decouples nicely: horizontal acceleration depends only on drag
-// (Magnus has no horizontal component), and with drag fixed the vertical lift
-// is monotonic in Magnus. So we solve two well-conditioned, unimodal 1D
-// searches (golden-section) and coordinate-descend a few rounds to absorb the
-// weak coupling (drag's horizontal term uses total speed, which Magnus shifts
-// via vy). Runs async in rounds to stay responsive and cancellable.
+export function countFitDimensions(targets: FitTargetParams): number {
+  return (
+    (targets.fitExitVelocity ? 1 : 0) +
+    (targets.fitExitAngle ? 1 : 0) +
+    (targets.fitDrag ? 1 : 0) +
+    (targets.fitMagnus ? 1 : 0) +
+    (targets.fitMagnusPower ? 1 : 0)
+  );
+}
+
+export function computeFitTotalEvals(
+  numSplits: number,
+  numRecursions: number,
+  targets: FitTargetParams
+): number {
+  const dims = countFitDimensions(targets);
+  if (dims === 0) return 0;
+  const n = Math.max(2, Math.floor(numSplits));
+  const r = Math.max(1, Math.floor(numRecursions));
+  return r * n ** dims;
+}
+
+const FIT_PENALTY = 100;
+const FIT_YIELD_EVERY = 8;
+
+type FitDimKey = 'velocity' | 'angle' | 'drag' | 'magnus' | 'magnusPower';
+
+interface FitSimParams {
+  exitVelocity: number;
+  exitAngle: number;
+  drag: number;
+  magnus: number;
+  magnusPower: number;
+}
+
+interface FitDimSpec {
+  key: FitDimKey;
+  lo: number;
+  hi: number;
+  clampMin: number;
+  clampMax: number;
+}
+
+function buildGrid(lo: number, hi: number, numSplits: number): number[] {
+  const n = Math.max(1, Math.floor(numSplits));
+  if (n === 1) return [(lo + hi) / 2];
+  const step = (hi - lo) / n;
+  return Array.from({ length: n }, (_, i) => lo + i * step);
+}
+
+function preprocessObservations(
+  trajectory: TrajectoryPoint[],
+  ppm: number,
+  framerate: number
+): { obs: { t: number; x: number; y: number }[]; simMaxTime: number } | null {
+  const sorted = plottedPoints(trajectory).sort((a, b) => a.frame - b.frame);
+  if (sorted.length < 3 || ppm <= 0 || framerate <= 0) return null;
+
+  const launch = sorted[0];
+  const frame0 = launch.frame;
+  const obs = sorted.map((p) => ({
+    t: (p.frame - frame0) / framerate,
+    x: (p.x - launch.x) / ppm,
+    y: (launch.y - p.y) / ppm,
+  }));
+  if (obs[obs.length - 1].t <= 0) return null;
+
+  return {
+    obs,
+    simMaxTime: Math.min(SIM_MAX_TIME, obs[obs.length - 1].t + 0.05),
+  };
+}
+
+export interface FitTrajectoryInput {
+  points: { x: number; y: number; frame: number }[];
+  exitVelocity: number;
+  exitAngle: number;
+  dragCoefficient: number;
+  magnusGain: number;
+  magnusPower: number;
+}
+
+interface FitObservationSet {
+  obs: { t: number; x: number; y: number }[];
+  simMaxTime: number;
+  fixed: FitSimParams;
+}
+
+function buildObservationSets(
+  trajectories: FitTrajectoryInput[],
+  ppm: number,
+  framerate: number
+): FitObservationSet[] {
+  const sets: FitObservationSet[] = [];
+  for (const traj of trajectories) {
+    const prepped = preprocessObservations(traj.points, ppm, framerate);
+    if (!prepped) continue;
+    sets.push({
+      ...prepped,
+      fixed: {
+        exitVelocity: traj.exitVelocity,
+        exitAngle: traj.exitAngle,
+        drag: traj.dragCoefficient,
+        magnus: traj.magnusGain,
+        magnusPower: traj.magnusPower,
+      },
+    });
+  }
+  return sets;
+}
+
+function mergeTrialParams(
+  trial: FitSimParams,
+  fixed: FitSimParams,
+  fitTargets: FitTargetParams
+): FitSimParams {
+  return {
+    exitVelocity: fitTargets.fitExitVelocity ? trial.exitVelocity : fixed.exitVelocity,
+    exitAngle: fitTargets.fitExitAngle ? trial.exitAngle : fixed.exitAngle,
+    drag: fitTargets.fitDrag ? trial.drag : fixed.drag,
+    magnus: fitTargets.fitMagnus ? trial.magnus : fixed.magnus,
+    magnusPower: fitTargets.fitMagnusPower ? trial.magnusPower : fixed.magnusPower,
+  };
+}
+
+function evaluateFitCost(
+  params: FitSimParams,
+  obs: { t: number; x: number; y: number }[],
+  simMaxTime: number
+): { cost: number; meanDistance: number; rmse: number } {
+  if (params.exitVelocity <= 0) {
+    return { cost: Infinity, meanDistance: Infinity, rmse: Infinity };
+  }
+
+  const sim = simulateShot(
+    params.exitVelocity,
+    params.exitAngle,
+    params.drag,
+    params.magnus,
+    simMaxTime,
+    SIM_DT,
+    params.magnusPower
+  );
+  let sumDist = 0;
+  let sumSq = 0;
+  let count = 0;
+
+  for (const o of obs) {
+    if (o.t <= 0) continue;
+    const s = interpSimAtTime(sim, o.t, SIM_DT);
+    if (s === null) {
+      sumDist += FIT_PENALTY;
+      sumSq += FIT_PENALTY * FIT_PENALTY;
+    } else {
+      const d = Math.hypot(s.x - o.x, s.y - o.y);
+      sumDist += d;
+      sumSq += d * d;
+    }
+    count++;
+  }
+
+  if (count === 0) {
+    return { cost: Infinity, meanDistance: Infinity, rmse: Infinity };
+  }
+
+  return {
+    cost: sumDist,
+    meanDistance: sumDist / count,
+    rmse: Math.sqrt(sumSq / count),
+  };
+}
+
+export interface TrajectoryFitCost {
+  cost: number;
+  meanDistance: number;
+  rmse: number;
+}
+
+/** Same cost metric as fit: sum of time-aligned point distances (meters). */
+export function computeTrajectoryFitCost(
+  points: { x: number; y: number; frame: number }[],
+  params: {
+    exitVelocity: number;
+    exitAngle: number;
+    dragCoefficient: number;
+    magnusGain: number;
+    magnusPower: number;
+  },
+  ppm: number,
+  framerate: number
+): TrajectoryFitCost | null {
+  const prepped = preprocessObservations(points, ppm, framerate);
+  if (!prepped) return null;
+  const metrics = evaluateFitCost(
+    {
+      exitVelocity: params.exitVelocity,
+      exitAngle: params.exitAngle,
+      drag: params.dragCoefficient,
+      magnus: params.magnusGain,
+      magnusPower: params.magnusPower,
+    },
+    prepped.obs,
+    prepped.simMaxTime
+  );
+  if (!Number.isFinite(metrics.cost)) return null;
+  return metrics;
+}
+
+function evaluateCombinedFitCost(
+  trial: FitSimParams,
+  observationSets: FitObservationSet[],
+  fitTargets: FitTargetParams,
+  fitAll: boolean
+): { cost: number; meanDistance: number; rmse: number } {
+  if (observationSets.length === 0) {
+    return { cost: Infinity, meanDistance: Infinity, rmse: Infinity };
+  }
+
+  const perTraj = observationSets.map((set) =>
+    evaluateFitCost(
+      mergeTrialParams(trial, set.fixed, fitTargets),
+      set.obs,
+      set.simMaxTime
+    )
+  );
+
+  if (fitAll && observationSets.length > 1) {
+    let bestIdx = 0;
+    let bestCost = perTraj[0].cost;
+    for (let i = 1; i < perTraj.length; i++) {
+      if (perTraj[i].cost < bestCost) {
+        bestCost = perTraj[i].cost;
+        bestIdx = i;
+      }
+    }
+    return perTraj[bestIdx];
+  }
+
+  if (perTraj.length === 1) return perTraj[0];
+
+  const cost = perTraj.reduce((s, m) => s + m.cost, 0);
+  const meanDistance = perTraj.reduce((s, m) => s + m.meanDistance, 0) / perTraj.length;
+  const rmse = perTraj.reduce((s, m) => s + m.rmse, 0) / perTraj.length;
+  return { cost, meanDistance, rmse };
+}
+
+function buildActiveFitDims(config: FitGridConfig): FitDimSpec[] {
+  const dims: FitDimSpec[] = [];
+  const { fitTargets: t } = config;
+
+  if (t.fitExitVelocity) {
+    dims.push({
+      key: 'velocity',
+      lo: config.velocityMin,
+      hi: config.velocityMax,
+      clampMin: config.velocityMin,
+      clampMax: config.velocityMax,
+    });
+  }
+  if (t.fitExitAngle) {
+    dims.push({
+      key: 'angle',
+      lo: config.angleMin,
+      hi: config.angleMax,
+      clampMin: config.angleMin,
+      clampMax: config.angleMax,
+    });
+  }
+  if (t.fitDrag) {
+    dims.push({
+      key: 'drag',
+      lo: config.dragMin,
+      hi: config.dragMax,
+      clampMin: config.dragMin,
+      clampMax: config.dragMax,
+    });
+  }
+  if (t.fitMagnus) {
+    dims.push({
+      key: 'magnus',
+      lo: config.magnusMin,
+      hi: config.magnusMax,
+      clampMin: config.magnusMin,
+      clampMax: config.magnusMax,
+    });
+  }
+  if (t.fitMagnusPower) {
+    dims.push({
+      key: 'magnusPower',
+      lo: config.magnusPowerMin,
+      hi: config.magnusPowerMax,
+      clampMin: config.magnusPowerMin,
+      clampMax: config.magnusPowerMax,
+    });
+  }
+
+  return dims;
+}
+
+function paramsFromIndices(
+  dims: FitDimSpec[],
+  grids: number[][],
+  indices: number[],
+  fixed: FitSimParams
+): FitSimParams {
+  const result = { ...fixed };
+  for (let d = 0; d < dims.length; d++) {
+    const v = grids[d][indices[d]];
+    switch (dims[d].key) {
+      case 'velocity': result.exitVelocity = v; break;
+      case 'angle': result.exitAngle = v; break;
+      case 'drag': result.drag = v; break;
+      case 'magnus': result.magnus = v; break;
+      case 'magnusPower': result.magnusPower = v; break;
+    }
+  }
+  return result;
+}
+
+function shrinkDimRange(grid: number[], bestIndex: number, numSplits: number, spec: FitDimSpec): { lo: number; hi: number } {
+  let lo = grid[Math.max(0, bestIndex - 1)];
+  let hi = grid[Math.min(numSplits - 1, bestIndex + 1)];
+  lo = Math.max(spec.clampMin, lo);
+  hi = Math.min(spec.clampMax, hi);
+  if (hi - lo < 1e-6) {
+    lo = spec.clampMin;
+    hi = spec.clampMax;
+  }
+  return { lo, hi };
+}
+
+// Recursive N-D grid search over selected launch/physics parameters.
+// Cost = sum of Euclidean distances between each plotted point and the sim at the
+// same time of flight. With fitAll, cost is the lowest cost among all trajectories.
+// Runs async in chunks to stay responsive and cancellable.
 export function fitDragMagnusAsync(
-  trajectory: { x: number; y: number; frame: number }[],
+  trajectories: FitTrajectoryInput[],
   ppm: number,
   framerate: number,
-  exitVelocity: number,
-  exitAngle: number,
-  onProgress: (progress: number) => void,
-  signal: { cancelled: boolean }
-): Promise<DragMagnusFitResult | null> {
+  onProgress: (progress: FitProgress) => void,
+  signal: { cancelled: boolean },
+  config: FitGridConfig = DEFAULT_FIT_GRID_CONFIG
+): Promise<TrajectoryFitResult | null> {
   return new Promise((resolve) => {
-    if (trajectory.length < 3 || ppm <= 0 || framerate <= 0 || exitVelocity <= 0) {
+    const numSplits = Math.max(2, Math.floor(config.numSplits));
+    const numRecursions = Math.max(1, Math.floor(config.numRecursions));
+    const numDims = countFitDimensions(config.fitTargets);
+
+    if (numDims === 0) {
       resolve(null);
       return;
     }
 
-    // Preprocess: sort by frame, convert to launch-relative meters with time.
-    const sorted = [...trajectory].sort((a, b) => a.frame - b.frame);
-    const launch = sorted[0];
-    const frame0 = launch.frame;
-    const obs = sorted.map((p) => ({
-      t: (p.frame - frame0) / framerate,
-      x: (p.x - launch.x) / ppm,
-      y: (launch.y - p.y) / ppm,
-    }));
-    if (obs[obs.length - 1].t <= 0) {
+    const activeTrajectories = config.fitAll
+      ? trajectories
+      : trajectories.slice(0, 1);
+    const observationSets = buildObservationSets(activeTrajectories, ppm, framerate);
+
+    if (observationSets.length === 0) {
       resolve(null);
       return;
     }
 
-    const PENALTY = 100; // per-point cost when the sim doesn't reach that time
-
-    // Mean squared error using a selector for which axis (or both) to score.
-    const meanSqErr = (
-      b: number,
-      k: number,
-      sel: (s: SimPoint, o: { x: number; y: number }) => number
-    ) => {
-      const sim = simulateShot(exitVelocity, exitAngle, b, k);
-      let err = 0;
-      for (const o of obs) {
-        const s = interpAtTime(sim, o.t, SIM_DT);
-        err += s === null ? PENALTY : sel(s, o);
+    const primary = activeTrajectories[0];
+    if (!config.fitTargets.fitExitVelocity) {
+      const needsVelocity = config.fitAll
+        ? observationSets.every((set) => set.fixed.exitVelocity > 0)
+        : primary.exitVelocity > 0;
+      if (!needsVelocity) {
+        resolve(null);
+        return;
       }
-      return err / obs.length;
+    }
+
+    const gridEvalsPerRecursion = numSplits ** numDims;
+    const totalEvals = numRecursions * gridEvalsPerRecursion;
+
+    const initial: FitSimParams = {
+      exitVelocity: primary.exitVelocity,
+      exitAngle: primary.exitAngle,
+      drag: primary.dragCoefficient,
+      magnus: primary.magnusGain,
+      magnusPower: primary.magnusPower,
     };
 
-    const costX = (b: number, k: number) =>
-      meanSqErr(b, k, (s, o) => (s.x - o.x) ** 2);
-    const costY = (b: number, k: number) =>
-      meanSqErr(b, k, (s, o) => (s.y - o.y) ** 2);
-    const cost2D = (b: number, k: number) =>
-      meanSqErr(b, k, (s, o) => (s.x - o.x) ** 2 + (s.y - o.y) ** 2);
+    let activeDims = buildActiveFitDims(config);
+    let currentParams = { ...initial };
+    let bestMetrics = { cost: Infinity, meanDistance: Infinity, rmse: Infinity };
 
-    let drag = 0;
-    let magnus = 0;
-    let prevCost = Infinity;
-    const maxRounds = 6;
-    let round = 0;
+    let completedEvals = 0;
+    let recursionIndex = 0;
 
-    function runRound() {
+    function reportProgress(iteration: number) {
+      onProgress({
+        recursion: recursionIndex,
+        numRecursions,
+        iteration,
+        gridSize: gridEvalsPerRecursion,
+        totalEvals,
+        progress: completedEvals / totalEvals,
+      });
+    }
+
+    function finishFit() {
+      resolve({
+        exitVelocity: currentParams.exitVelocity,
+        exitAngle: currentParams.exitAngle,
+        dragCoefficient: currentParams.drag,
+        magnusGain: currentParams.magnus,
+        magnusPower: currentParams.magnusPower,
+        meanDistance: bestMetrics.meanDistance,
+        rmse: bestMetrics.rmse,
+      });
+    }
+
+    function decodeFlatIndex(flat: number): number[] {
+      const indices = new Array(activeDims.length);
+      let rem = flat;
+      for (let d = activeDims.length - 1; d >= 0; d--) {
+        indices[d] = rem % numSplits;
+        rem = Math.floor(rem / numSplits);
+      }
+      return indices;
+    }
+
+    function runRecursion() {
       if (signal.cancelled) {
         resolve(null);
         return;
       }
 
-      // 1D drag fit from horizontal error (Magnus held fixed).
-      drag = goldenSection((b) => costX(b, magnus), 0, DRAG_MAX);
-      // 1D Magnus fit from vertical error (drag held fixed).
-      magnus = goldenSection((k) => costY(drag, k), 0, MAGNUS_MAX);
+      recursionIndex++;
 
-      round++;
-      onProgress(Math.min(round / maxRounds, 1));
+      const grids = activeDims.map((d) => buildGrid(d.lo, d.hi, numSplits));
+      let localBestCost = Infinity;
+      let localBestMetrics = bestMetrics;
+      let localBestIndices = new Array(activeDims.length).fill(0);
 
-      const c = cost2D(drag, magnus);
-      const converged = Math.abs(prevCost - c) < 1e-7;
-      prevCost = c;
+      function runGridFlat(flatIndex: number) {
+        if (signal.cancelled) {
+          resolve(null);
+          return;
+        }
 
-      if (round >= maxRounds || converged) {
-        resolve({
-          dragCoefficient: Math.round(drag * 1000) / 1000,
-          magnusGain: Math.round(magnus * 1000) / 1000,
-          rmse: Math.sqrt(c),
-        });
-      } else {
-        setTimeout(runRound, 0);
+        if (flatIndex >= gridEvalsPerRecursion) {
+          currentParams = paramsFromIndices(activeDims, grids, localBestIndices, initial);
+          bestMetrics = localBestMetrics;
+
+          if (recursionIndex < numRecursions) {
+            activeDims = activeDims.map((dim, d) => {
+              const shrunk = shrinkDimRange(grids[d], localBestIndices[d], numSplits, dim);
+              return { ...dim, lo: shrunk.lo, hi: shrunk.hi };
+            });
+            setTimeout(runRecursion, 0);
+          } else {
+            finishFit();
+          }
+          return;
+        }
+
+        const indices = decodeFlatIndex(flatIndex);
+        const trial = paramsFromIndices(activeDims, grids, indices, initial);
+        const metrics = evaluateCombinedFitCost(
+          trial,
+          observationSets,
+          config.fitTargets,
+          config.fitAll && observationSets.length > 1
+        );
+
+        if (metrics.cost < localBestCost) {
+          localBestCost = metrics.cost;
+          localBestMetrics = metrics;
+          localBestIndices = indices;
+        }
+
+        completedEvals++;
+        reportProgress(flatIndex + 1);
+
+        const advance = () => runGridFlat(flatIndex + 1);
+        if (completedEvals % FIT_YIELD_EVERY === 0) setTimeout(advance, 0);
+        else advance();
       }
+
+      runGridFlat(0);
     }
 
-    setTimeout(runRound, 0);
+    setTimeout(runRecursion, 0);
   });
 }
 
@@ -417,29 +845,10 @@ export function simulatePeakHeight(
   exitAngleDeg: number,
   drag: number,
   magnus: number,
-  dt = 0.005
+  dt = SIM_DT
 ): number {
-  const g = 9.81;
-  const angleRad = (exitAngleDeg * Math.PI) / 180;
-  let vx = exitVelocity * Math.cos(angleRad);
-  let vy = exitVelocity * Math.sin(angleRad);
-  let x = 0;
-  let y = 0;
-  let peak = 0;
-
-  for (let t = 0; t < 10; t += dt) {
-    const v = Math.sqrt(vx * vx + vy * vy);
-    const dragMag = drag * v * v;
-    const ax = -(dragMag * (vx / v));
-    const ay = -g - dragMag * (vy / v) + magnus * v;
-    vx += ax * dt;
-    vy += ay * dt;
-    x += vx * dt;
-    y += vy * dt;
-    if (y > peak) peak = y;
-    if (y < -1) break;
-  }
-  return peak;
+  const pts = simulateShot(exitVelocity, exitAngleDeg, drag, magnus, SIM_MAX_TIME, dt);
+  return pts.reduce((peak, p) => Math.max(peak, p.y), 0);
 }
 
 // Compute the impact angle (degrees below horizontal) at targetDx.
@@ -450,37 +859,17 @@ export function simulateImpactAngle(
   drag: number,
   magnus: number,
   targetDx: number,
-  dt = 0.005
+  dt = SIM_DT
 ): number | null {
-  const g = 9.81;
-  const angleRad = (exitAngleDeg * Math.PI) / 180;
-  let vx = exitVelocity * Math.cos(angleRad);
-  let vy = exitVelocity * Math.sin(angleRad);
-  let x = 0;
-  let y = 0;
-
-  for (let t = 0; t < 10; t += dt) {
-    const v = Math.sqrt(vx * vx + vy * vy);
-    const dragMag = drag * v * v;
-    const ax = -(dragMag * (vx / v));
-    const ay = -g - dragMag * (vy / v) + magnus * v;
-
-    const prevX = x;
-    vx += ax * dt;
-    vy += ay * dt;
-    x += vx * dt;
-    y += vy * dt;
-
-    if (prevX <= targetDx && x >= targetDx) {
-      // interpolate vx/vy at exact targetDx crossing
-      const frac = (targetDx - prevX) / (x - prevX);
-      const interpVy = vy - (vy - (vy - ay * dt)) * (1 - frac); // approx: use current vy
-      const interpVx = vx;
-      // impact angle = angle below horizontal (positive when descending)
-      return -(Math.atan2(interpVy, interpVx) * 180) / Math.PI;
+  const pts = simulateShot(exitVelocity, exitAngleDeg, drag, magnus, SIM_MAX_TIME, dt);
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i];
+    const b = pts[i + 1];
+    if (a.x <= targetDx && b.x >= targetDx) {
+      const vx = (b.x - a.x) / dt;
+      const vy = (b.y - a.y) / dt;
+      return -(Math.atan2(vy, vx) * 180) / Math.PI;
     }
-
-    if (y < -1) break;
   }
   return null;
 }
@@ -495,7 +884,7 @@ export function simulateLanding(
   targetDx: number,
   targetDy: number
 ): { landingX: number; landingY: number; timeOfFlight: number } | null {
-  const pts = simulateShot(exitVelocity, exitAngleDeg, drag, magnus, 10, 0.005);
+  const pts = simulateShot(exitVelocity, exitAngleDeg, drag, magnus, SIM_MAX_TIME, SIM_DT);
   // Find the point where x crosses targetDx
   for (let i = 0; i < pts.length - 1; i++) {
     const a = pts[i];
@@ -503,7 +892,7 @@ export function simulateLanding(
     if (a.x <= targetDx && b.x >= targetDx) {
       const t2 = (targetDx - a.x) / (b.x - a.x);
       const y = a.y + t2 * (b.y - a.y);
-      const time = (i + t2) * 0.005;
+      const time = (i + t2) * SIM_DT;
       return { landingX: targetDx, landingY: y, timeOfFlight: time };
     }
   }

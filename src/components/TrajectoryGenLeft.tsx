@@ -245,10 +245,12 @@ export default function TrajectoryGenLeft({ params, onChange, onGenerate, genera
             onChange={(v) => set('dy', v)} />
           <NumInput label="Goal Width" unit="m" value={params.goalWidth} step={0.05} min={0.05}
             onChange={(v) => set('goalWidth', Math.max(0.05, v))} />
-          <NumInput label="Drag Coefficient" value={params.dragCoefficient} step={0.001} min={0}
-            onChange={(v) => set('dragCoefficient', Math.max(0, v))} />
-          <NumInput label="Magnus Coefficient" value={params.magnusGain} step={0.001}
-            onChange={(v) => set('magnusGain', v)} />
+          <NumInput label="Drag Coefficient" value={params.dragCoefficient} step={0.01} min={0} max={0.2}
+            onChange={(v) => set('dragCoefficient', Math.min(0.2, Math.max(0, v)))} />
+          <NumInput label="Magnus Coefficient" value={params.magnusGain} step={0.01} min={-0.3} max={0.3}
+            onChange={(v) => set('magnusGain', Math.min(0.3, Math.max(-0.3, v)))} />
+          <NumInput label="Magnus Power" value={params.magnusPower ?? 2} step={0.1} min={1} max={3}
+            onChange={(v) => set('magnusPower', Math.min(3, Math.max(1, v)))} />
         </div>
 
         <div className="border-t border-gray-700" />

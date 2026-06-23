@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { TrajGenParams, TrajGroup } from '../types';
-import { simulateShot } from '../simulation';
+import { simulateShot, SIM_MAX_TIME, SIM_DT } from '../simulation';
 
 interface Props {
   params: TrajGenParams;
@@ -179,12 +179,13 @@ export default function TrajectoryGenCanvas({ params, groups, selectedGroupId, s
     const activeTraj = selectedGroup ? selectedGroup.trajectories : [];
     const activeDrag = selectedGroup ? selectedGroup.drag : params.dragCoefficient;
     const activeMagnus = selectedGroup ? selectedGroup.magnus : params.magnusGain;
+    const activeMagnusPower = params.magnusPower ?? 2;
 
     const highlighted = new Set([selectedId, hoveredId].filter(Boolean) as string[]);
 
     for (const traj of activeTraj) {
       if (highlighted.has(traj.id)) continue;
-      const pts = simulateShot(traj.exitVelocity, traj.exitAngle, activeDrag, activeMagnus);
+      const pts = simulateShot(traj.exitVelocity, traj.exitAngle, activeDrag, activeMagnus, SIM_MAX_TIME, SIM_DT, activeMagnusPower);
       ctx.beginPath();
       let started = false;
       for (const p of pts) {
@@ -201,7 +202,7 @@ export default function TrajectoryGenCanvas({ params, groups, selectedGroupId, s
     for (const traj of activeTraj) {
       if (!highlighted.has(traj.id)) continue;
       const isSelected = traj.id === selectedId;
-      const pts = simulateShot(traj.exitVelocity, traj.exitAngle, activeDrag, activeMagnus);
+      const pts = simulateShot(traj.exitVelocity, traj.exitAngle, activeDrag, activeMagnus, SIM_MAX_TIME, SIM_DT, activeMagnusPower);
       ctx.beginPath();
       let started = false;
       for (const p of pts) {

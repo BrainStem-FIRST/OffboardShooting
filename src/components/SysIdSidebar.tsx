@@ -1,23 +1,22 @@
 import { useRef, useState, useEffect, useMemo } from 'react';
 import {
-  Upload, Film, Trash2, Crosshair, RotateCcw, Save, Trash,
+  Upload, Film, Trash2, Crosshair, RotateCcw, Save, Trash, SkipForward,
 } from 'lucide-react';
 import { VideoData, TrajectoryPoint, Meterstick } from '../types';
 import { empiricalFromPoints, gravityCorrectionQuality } from '../simulation';
 import {
   buildTrajectorySegments,
-  segmentAtFrame,
   activeSegmentAtFrame,
-  formatFrameRange,
-  trajectoryPointsToSaveFile,
-  saveFileToTrajectoryPoints,
-  parseLegacyTrajectoryText,
-  TrajectorySaveFile,
+  getLaunchParams,
+  countPlottedPoints,
+  videoToConfigurationSaveFile,
+  parseConfigurationFile,
+  LoadedConfiguration,
 } from '../utils/trajectorySegments';
 import {
-  panelAside, panelTab, panelSectionTitle, panelSubsectionTitle, panelItemTitle, panelLabel, panelBody,
+  panelAside, panelTab, panelSectionTitle, panelSubsectionTitle, panelItemTitle, panelLabel, panelLabelInline, panelBody,
   panelHint, panelMeta, panelInput, panelInputNumeric, panelBtn, panelBtnPrimary, panelListItem,
-  panelEmpty, panelMono, panelContent, panelDivider,
+  panelEmpty, panelMono, panelDivider,
 } from './panelStyles';
 
 type SidebarTab = 'upload' | 'annotation' | 'export';
@@ -119,6 +118,10 @@ interface Props {
   onPlottingModeChange: (v: boolean) => void;
   showAllTrajectories: boolean;
   onShowAllTrajectoriesChange: (v: boolean) => void;
+  showAverageTrajectory: boolean;
+  onShowAverageTrajectoryChange: (v: boolean) => void;
+  showTrajectoryPoints: boolean;
+  onShowTrajectoryPointsChange: (v: boolean) => void;
   focusedTrajectoryId: string | null;
   onFocusedTrajectoryChange: (id: string | null) => void;
   onTrajectoryUpdate: (points: TrajectoryPoint[]) => void;
@@ -135,7 +138,9 @@ interface Props {
   onDeleteCurrentPoint: () => void;
   onClearAllPoints: () => void;
   canDeleteCurrentPoint: boolean;
-  onLoadTrajectory: (videoId: string, points: TrajectoryPoint[]) => void;
+  canSkipFrame: boolean;
+  onSkipFrame: () => void;
+  onLoadConfiguration: (videoId: string, config: LoadedConfiguration) => void;
 }
 
 export default function SysIdSidebar({
@@ -150,6 +155,10 @@ export default function SysIdSidebar({
   onPlottingModeChange,
   showAllTrajectories,
   onShowAllTrajectoriesChange,
+  showAverageTrajectory,
+  onShowAverageTrajectoryChange,
+  showTrajectoryPoints,
+  onShowTrajectoryPointsChange,
   focusedTrajectoryId,
   onFocusedTrajectoryChange,
   onTrajectoryUpdate,
@@ -166,7 +175,9 @@ export default function SysIdSidebar({
   onDeleteCurrentPoint,
   onClearAllPoints,
   canDeleteCurrentPoint,
-  onLoadTrajectory,
+  canSkipFrame,
+  onSkipFrame,
+  onLoadConfiguration,
 }: Props) {
   const [activeTab, setActiveTab] = useState<SidebarTab>('upload');
   const uploadInputRef = useRef<HTMLInputElement>(null);
@@ -194,14 +205,20 @@ export default function SysIdSidebar({
 
   const segmentStats = useMemo(() => {
     const ppm = meterstick.length;
-    return segments.map((seg) => ({
-      ...seg,
-      ...empiricalFromPoints(seg.points, ppm, framerate, empiricalNumPoints),
-    }));
-  }, [segments, meterstick.length, framerate, empiricalNumPoints]);
+    const stored = selectedVideo?.trajectoryLaunchParams;
+    return segments.map((seg) => {
+      const actual = getLaunchParams(stored, seg.id);
+      return {
+        ...seg,
+        ...empiricalFromPoints(seg.points, ppm, framerate, empiricalNumPoints),
+        actualSpeed: actual.exitVelocity,
+        actualAngle: actual.exitAngle,
+      };
+    });
+  }, [segments, meterstick.length, framerate, empiricalNumPoints, selectedVideo?.trajectoryLaunchParams]);
 
   const numPointsSliderMax = useMemo(() => {
-    const longest = segments.reduce((m, s) => Math.max(m, s.points.length), 0);
+    const longest = segments.reduce((m, s) => Math.max(m, countPlottedPoints(s.points)), 0);
     return Math.max(longest, empiricalNumPoints, 10);
   }, [segments, empiricalNumPoints]);
 
@@ -223,16 +240,22 @@ export default function SysIdSidebar({
   }
 
   const averages = useMemo(() => {
-    const withSpeed = segmentStats.filter((s) => s.speed !== null);
-    const withAngle = segmentStats.filter((s) => s.angle !== null);
+    const withEstSpeed = segmentStats.filter((s) => s.speed !== null);
+    const withEstAngle = segmentStats.filter((s) => s.angle !== null);
     return {
-      speed: withSpeed.length > 0
-        ? withSpeed.reduce((sum, s) => sum + s.speed!, 0) / withSpeed.length
+      estimateSpeed: withEstSpeed.length > 0
+        ? withEstSpeed.reduce((sum, s) => sum + s.speed!, 0) / withEstSpeed.length
         : null,
-      angle: withAngle.length > 0
-        ? withAngle.reduce((sum, s) => sum + s.angle!, 0) / withAngle.length
+      estimateAngle: withEstAngle.length > 0
+        ? withEstAngle.reduce((sum, s) => sum + s.angle!, 0) / withEstAngle.length
         : null,
-      count: withSpeed.length,
+      actualSpeed: segmentStats.length > 0
+        ? segmentStats.reduce((sum, s) => sum + s.actualSpeed, 0) / segmentStats.length
+        : null,
+      actualAngle: segmentStats.length > 0
+        ? segmentStats.reduce((sum, s) => sum + s.actualAngle, 0) / segmentStats.length
+        : null,
+      count: segmentStats.length,
     };
   }, [segmentStats]);
 
@@ -246,10 +269,10 @@ export default function SysIdSidebar({
   }
 
   function handleSave() {
-    if (!selectedVideo || selectedVideo.trajectory.length === 0) return;
-    const baseName = saveName.trim() || selectedVideo.name.replace(/\.[^.]+$/, '') + '_trajectories';
+    if (!selectedVideo) return;
+    const baseName = saveName.trim() || selectedVideo.name.replace(/\.[^.]+$/, '') + '_configuration';
     const fileName = baseName.endsWith('.json') ? baseName : baseName + '.json';
-    const payload = trajectoryPointsToSaveFile(selectedVideo.name, selectedVideo.trajectory);
+    const payload = videoToConfigurationSaveFile(selectedVideo);
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -266,16 +289,8 @@ export default function SysIdSidebar({
     const reader = new FileReader();
     reader.onload = (ev) => {
       const text = ev.target?.result as string;
-      let points: TrajectoryPoint[] = [];
-      try {
-        const parsed = JSON.parse(text) as TrajectorySaveFile;
-        if (parsed.version === 1 && Array.isArray(parsed.trajectories)) {
-          points = saveFileToTrajectoryPoints(parsed);
-        }
-      } catch {
-        points = parseLegacyTrajectoryText(text);
-      }
-      if (points.length > 0) onLoadTrajectory(loadTargetVideoId, points);
+      const config = parseConfigurationFile(text);
+      if (config) onLoadConfiguration(loadTargetVideoId, config);
     };
     reader.readAsText(file);
   }
@@ -301,6 +316,8 @@ export default function SysIdSidebar({
         ))}
       </div>
 
+      <div className="flex-1 min-h-0 overflow-y-auto [direction:rtl]">
+      <div className="[direction:ltr]">
       {/* ── Video Upload ── */}
       {activeTab === 'upload' && (
         <>
@@ -322,7 +339,7 @@ export default function SysIdSidebar({
               onChange={handleUploadFiles}
             />
           </div>
-          <div className="flex-1 overflow-y-auto p-3 space-y-1.5">
+          <div className="p-3 space-y-1.5">
             {videos.length === 0 && (
               <p className={`${panelEmpty} mt-8 px-2`}>
                 No videos yet. Upload an iPhone video to get started.
@@ -356,9 +373,8 @@ export default function SysIdSidebar({
 
       {/* ── Trajectory Annotation ── */}
       {activeTab === 'annotation' && (
-        <div className="flex flex-col flex-1 min-h-0">
-          {!selectedVideo ? (
-            <p className={`${panelEmpty} mt-8 px-4`}>
+          !selectedVideo ? (
+            <p className={`${panelEmpty} mt-8 px-4 pb-8`}>
               Select a video from the Video Upload tab to annotate trajectories.
             </p>
           ) : (
@@ -381,7 +397,7 @@ export default function SysIdSidebar({
                 </p>
 
                 <p className={panelBody}>
-                  Click on video to plot points. Arrow keys to step frames. Delete key to remove current point. Ctrl + Z / Ctrl + Y to undo/redo.
+                  Click on video to plot points. Arrow keys to step frames. WASD to nudge the current point by 1 cm. Delete key to remove current point. Ctrl + Z / Ctrl + Y to undo/redo. Click the meterstick, then Ctrl + C / Ctrl + V to copy its position and scale to another video.
                 </p>
               </div>
 
@@ -442,17 +458,6 @@ export default function SysIdSidebar({
                     Redo
                   </button>
                   <button
-                    onClick={() => onPlottingModeChange(!plottingMode)}
-                    className={`${panelBtn} ${
-                      plottingMode
-                        ? 'bg-green-700 text-white hover:bg-green-600'
-                        : 'bg-green-600 text-white hover:bg-green-500'
-                    }`}
-                  >
-                    <Crosshair size={14} />
-                    {plottingMode ? 'Stop Plotting' : 'Plot Ball'}
-                  </button>
-                  <button
                     onClick={onDeleteCurrentPoint}
                     disabled={!canDeleteCurrentPoint}
                     title="Delete current (Delete)"
@@ -469,37 +474,76 @@ export default function SysIdSidebar({
                     Clear all
                   </button>
                 </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={() => onPlottingModeChange(!plottingMode)}
+                    className={`${panelBtn} ${
+                      plottingMode
+                        ? 'bg-green-700 text-white hover:bg-green-600'
+                        : 'bg-green-600 text-white hover:bg-green-500'
+                    }`}
+                  >
+                    <Crosshair size={14} />
+                    {plottingMode ? 'Stop Plotting' : 'Plot Ball'}
+                  </button>
+                  <button
+                    onClick={onSkipFrame}
+                    disabled={!canSkipFrame}
+                    title="Label current frame as skipped (ball off-screen) and advance"
+                    className={`${panelBtn} bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed`}
+                  >
+                    <SkipForward size={14} />
+                    Skip frame
+                  </button>
+                </div>
 
-                <div className="rounded-md bg-gray-950 border border-gray-700 p-0.5 flex gap-0.5">
-                  <button
-                    onClick={() => onShowAllTrajectoriesChange(true)}
-                    className={`flex-1 px-2 py-1 text-xs font-medium rounded transition-all ${
-                      showAllTrajectories
-                        ? 'bg-blue-600 text-white ring-1 ring-blue-400/50 font-semibold'
-                        : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800/60'
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                  <label className="flex items-center gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={showAllTrajectories}
+                      onChange={(e) => onShowAllTrajectoriesChange(e.target.checked)}
+                      className="h-4 w-4 rounded border-gray-600 bg-gray-800 text-blue-600 focus:ring-blue-500 focus:ring-offset-0 focus:ring-offset-gray-900"
+                    />
+                    <span className={panelLabelInline}>Show all</span>
+                  </label>
+                  <label
+                    className={`flex items-center gap-2 select-none ${
+                      segments.length < 2 ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'
                     }`}
+                    title={
+                      segments.length < 2
+                        ? 'Plot at least 2 trajectories to show the average'
+                        : undefined
+                    }
                   >
-                    Show all
-                  </button>
-                  <button
-                    onClick={() => onShowAllTrajectoriesChange(false)}
-                    className={`flex-1 px-2 py-1 text-xs font-medium rounded transition-all ${
-                      !showAllTrajectories
-                        ? 'bg-blue-600 text-white ring-1 ring-blue-400/50 font-semibold'
-                        : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800/60'
-                    }`}
-                  >
-                    Show current
-                  </button>
+                    <input
+                      type="checkbox"
+                      checked={showAverageTrajectory}
+                      disabled={segments.length < 2}
+                      onChange={(e) => onShowAverageTrajectoryChange(e.target.checked)}
+                      className="h-4 w-4 rounded border-gray-600 bg-gray-800 text-blue-600 focus:ring-blue-500 focus:ring-offset-0 focus:ring-offset-gray-900 disabled:cursor-not-allowed"
+                    />
+                    <span className={panelLabelInline}>Show average</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={showTrajectoryPoints}
+                      onChange={(e) => onShowTrajectoryPointsChange(e.target.checked)}
+                      className="h-4 w-4 rounded border-gray-600 bg-gray-800 text-blue-600 focus:ring-blue-500 focus:ring-offset-0 focus:ring-offset-gray-900"
+                    />
+                    <span className={panelLabelInline}>Show points</span>
+                  </label>
                 </div>
               </div>
 
               {/* Trajectory list */}
-              <div className="flex-1 min-h-0 flex flex-col border-t border-gray-700">
-                <h3 className={`flex-shrink-0 px-4 py-2.5 ${panelSectionTitle}`}>
+              <div className="border-t border-gray-700">
+                <h3 className={`px-4 py-2.5 ${panelSectionTitle}`}>
                   Trajectories ({segments.length})
                 </h3>
-                <div className="flex-1 overflow-y-auto px-3 pb-3 space-y-1.5">
+                <div className="px-3 pb-3 space-y-1.5">
                   {segments.length === 0 && (
                     <p className={`${panelEmpty} py-4`}>No trajectories plotted yet</p>
                   )}
@@ -521,57 +565,52 @@ export default function SysIdSidebar({
                         <div className="font-semibold" style={{ color: seg.color }}>
                           {seg.name}
                         </div>
-                        <div className={`${panelMeta} mt-1`}>
-                          {formatFrameRange(seg.frameStart, seg.frameEnd)} · {seg.points.length} pt{seg.points.length !== 1 ? 's' : ''}
-                        </div>
                         <div className={`text-sm text-gray-300 mt-1 ${panelMono}`}>
+                          <span className={panelMeta}>Estimate: </span>
                           {seg.speed !== null ? `${seg.speed.toFixed(2)} m/s` : '— m/s'}
                           {' · '}
                           {seg.angle !== null ? `${seg.angle.toFixed(1)}°` : '—°'}
+                        </div>
+                        <div className={`text-sm text-gray-300 mt-0.5 ${panelMono}`}>
+                          <span className={panelMeta}>Actual: </span>
+                          {seg.actualSpeed.toFixed(2)} m/s
+                          {' · '}
+                          {seg.actualAngle.toFixed(1)}°
                         </div>
                       </button>
                     );
                   })}
                 </div>
-                {(averages.speed !== null || averages.angle !== null) && (
-                  <div className="flex-shrink-0 px-4 py-3 border-t border-gray-700 bg-gray-800/40 space-y-2">
+                {averages.count > 0 && (
+                  <div className="px-4 py-3 border-t border-gray-700 bg-gray-800/40 space-y-2">
                     <p className={panelSectionTitle}>
                       Averages ({averages.count} trajectory{averages.count !== 1 ? 'ies' : ''})
                     </p>
-                    <div className="flex items-baseline gap-6">
-                      <div>
-                        <span className={`${panelMeta} block mb-0.5`}>Exit speed</span>
-                        <span className={`text-base ${panelMono} font-semibold text-white`}>
-                          {averages.speed !== null ? averages.speed.toFixed(2) : '—'}
-                        </span>
-                        {averages.speed !== null && (
-                          <span className="text-sm text-gray-500 ml-1">m/s</span>
-                        )}
-                      </div>
-                      <div>
-                        <span className={`${panelMeta} block mb-0.5`}>Exit angle</span>
-                        <span className={`text-base ${panelMono} font-semibold text-white`}>
-                          {averages.angle !== null ? averages.angle.toFixed(1) : '—'}
-                        </span>
-                        {averages.angle !== null && (
-                          <span className="text-sm text-gray-500 ml-0.5">°</span>
-                        )}
-                      </div>
+                    <div className={`text-sm text-gray-300 ${panelMono}`}>
+                      <span className={panelMeta}>Estimate: </span>
+                      {averages.estimateSpeed !== null ? `${averages.estimateSpeed.toFixed(2)} m/s` : '— m/s'}
+                      {' · '}
+                      {averages.estimateAngle !== null ? `${averages.estimateAngle.toFixed(1)}°` : '—°'}
+                    </div>
+                    <div className={`text-sm text-gray-300 ${panelMono}`}>
+                      <span className={panelMeta}>Actual: </span>
+                      {averages.actualSpeed !== null ? `${averages.actualSpeed.toFixed(2)} m/s` : '— m/s'}
+                      {' · '}
+                      {averages.actualAngle !== null ? `${averages.actualAngle.toFixed(1)}°` : '—°'}
                     </div>
                   </div>
                 )}
               </div>
             </>
-          )}
-        </div>
+          )
       )}
 
       {/* ── Export & Import ── */}
       {activeTab === 'export' && (
-        <div className={panelContent}>
+        <div className="p-4 space-y-5">
           {videos.length === 0 ? (
             <p className={`${panelEmpty} mt-8 px-2`}>
-              Upload a video to save or load trajectory annotations.
+              Upload a video to save or load configuration.
             </p>
           ) : (
             <>
@@ -580,7 +619,7 @@ export default function SysIdSidebar({
                   <div>
                     <h2 className={`${panelItemTitle} mb-1 truncate`}>{selectedVideo.name}</h2>
                     <p className={panelBody}>
-                      Save all annotated trajectories as JSON. Legacy .txt files can still be imported.
+                      Save trajectories (including skipped frames), meterstick calibration, and per-trajectory simulation settings as JSON. Legacy v1 JSON and .txt files can still be imported.
                     </p>
                   </div>
 
@@ -591,7 +630,7 @@ export default function SysIdSidebar({
                         type="text"
                         value={saveName}
                         onChange={(e) => setSaveName(e.target.value)}
-                        placeholder={`${selectedVideo.name.replace(/\.[^.]+$/, '')}_trajectories`}
+                        placeholder={`${selectedVideo.name.replace(/\.[^.]+$/, '')}_configuration`}
                         className={`flex-1 min-w-0 ${panelInput}`}
                       />
                       <span className={`${panelMeta} flex-shrink-0`}>.json</span>
@@ -600,11 +639,10 @@ export default function SysIdSidebar({
 
                   <button
                     onClick={handleSave}
-                    disabled={selectedVideo.trajectory.length === 0}
-                    className={`w-full ${panelBtnPrimary} bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed`}
+                    className={`w-full ${panelBtnPrimary} bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white`}
                   >
                     <Save size={14} />
-                    Save Trajectories
+                    Save Configuration
                   </button>
 
                   {selectedVideo.trajectory.length === 0 && (
@@ -619,7 +657,7 @@ export default function SysIdSidebar({
                   <div className={panelDivider} />
                 </>
               ) : (
-                <p className={panelBody}>Select a video to save trajectory annotations.</p>
+                <p className={panelBody}>Select a video to save configuration.</p>
               )}
 
               <div>
@@ -653,12 +691,14 @@ export default function SysIdSidebar({
                 className={`w-full ${panelBtnPrimary} bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed`}
               >
                 <Upload size={14} />
-                Load Trajectories
+                Load Configuration
               </button>
             </>
           )}
         </div>
       )}
+      </div>
+      </div>
     </aside>
   );
 }
