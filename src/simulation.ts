@@ -23,6 +23,34 @@ export function speedBetweenPoints(
   return distM / dt;
 }
 
+/** Launch angle (degrees from horizontal) from the first two plotted points. */
+export function angleBetweenPoints(
+  p1: TrajectoryPoint,
+  p2: TrajectoryPoint,
+  pixelsPerMeter: number
+): number | null {
+  if (pixelsPerMeter <= 0) return null;
+  if (p2.frame - p1.frame <= 0) return null;
+  const physDx = (p2.x - p1.x) / pixelsPerMeter;
+  const physDy = (p1.y - p2.y) / pixelsPerMeter;
+  return Math.atan2(physDy, physDx) * (180 / Math.PI);
+}
+
+export function empiricalFromFirstTwoPoints(
+  points: TrajectoryPoint[],
+  pixelsPerMeter: number,
+  framerate: number
+): { speed: number | null; angle: number | null } {
+  const sorted = [...points].sort((a, b) => a.frame - b.frame);
+  if (sorted.length < 2) return { speed: null, angle: null };
+  const p1 = sorted[0];
+  const p2 = sorted[1];
+  return {
+    speed: speedBetweenPoints(p1, p2, pixelsPerMeter, framerate),
+    angle: angleBetweenPoints(p1, p2, pixelsPerMeter),
+  };
+}
+
 // Simulate projectile with drag (F = b * v^2) and Magnus lift (ay += magnusGain * v, upward)
 // Returns array of (x, y) in meters
 export function simulateShot(

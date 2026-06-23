@@ -2,6 +2,10 @@ import { useState, useEffect, useRef } from 'react';
 import { GeneratedTrajectory, TrajGroup, TrajGenParams } from '../types';
 import { Trash2, Download, Upload, Plus, RefreshCw, Copy, ChevronUp, ChevronDown, XCircle, X } from 'lucide-react';
 import { simulateLanding, simulateImpactAngle, refineTrajectory, refineGroupTrajectories, exportTrajectoriesToFolder } from '../simulation';
+import {
+  panelAside, panelSectionTitle, panelLabel, panelInput, panelBtnPrimary,
+  panelEmpty, panelHint, panelMeta, panelMono, panelContent,
+} from './panelStyles';
 
 interface Props {
   groups: TrajGroup[];
@@ -395,12 +399,12 @@ export default function TrajectoryGenRight({
   const totalTrajectoryCount = groups.reduce((sum, g) => sum + g.trajectories.length, 0);
 
   return (
-    <aside ref={containerRef} className="flex flex-col bg-gray-900 border-l border-gray-700 h-full overflow-hidden" style={{ width }}>
+    <aside ref={containerRef} className={`${panelAside} border-l border-gray-700`} style={{ width }}>
 
       {/* Group tabs */}
       <div className="flex-shrink-0 border-b border-gray-700 overflow-x-auto">
         {groups.length === 0 ? (
-          <div className="px-4 py-2 text-xs text-gray-600 italic">No trajectory groups yet</div>
+          <div className={`px-4 py-2 ${panelHint} italic`}>No trajectory groups yet</div>
         ) : (
           <div className="flex min-w-max">
             {groups.map(g => {
@@ -412,10 +416,10 @@ export default function TrajectoryGenRight({
                 >
                   <button
                     onClick={() => onSelectGroup(g.id)}
-                    className={`px-2.5 py-2 text-xs font-mono whitespace-nowrap transition-colors ${isActive ? 'text-white' : 'text-gray-500 hover:text-gray-300'}`}
+                    className={`px-2.5 py-2 text-sm ${panelMono} whitespace-nowrap transition-colors ${isActive ? 'text-white' : 'text-gray-500 hover:text-gray-300'}`}
                   >
                     {tabLabel(g)}
-                    <span className={`ml-1.5 font-sans px-1 py-0.5 rounded text-xs ${isActive ? 'bg-blue-900/60 text-blue-300' : 'bg-gray-800 text-gray-600'}`}>
+                    <span className={`ml-1.5 font-sans px-1.5 py-0.5 rounded text-xs ${isActive ? 'bg-blue-900/60 text-blue-300' : 'bg-gray-800 text-gray-600'}`}>
                       {g.trajectories.length}
                     </span>
                   </button>
@@ -437,19 +441,19 @@ export default function TrajectoryGenRight({
       {group && (
         <div className="flex-shrink-0 px-4 pt-3 pb-2 border-b border-gray-700">
           <div className="flex items-center justify-between mb-1">
-            <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-widest">Trajectories</h2>
-            <span className="text-xs font-mono bg-blue-900/40 text-blue-300 px-2 py-0.5 rounded-full">
+            <h2 className={panelSectionTitle}>Trajectories</h2>
+            <span className={`text-sm ${panelMono} bg-blue-900/40 text-blue-300 px-2 py-0.5 rounded-full`}>
               {trajectories.length}
             </span>
           </div>
           <div className="flex gap-4">
             <div className="flex items-center gap-1.5">
-              <span className="text-xs text-gray-600">Drag</span>
-              <span className="text-xs font-mono text-gray-400">{drag}</span>
+              <span className={panelMeta}>Drag</span>
+              <span className={`text-sm ${panelMono} text-gray-400`}>{drag}</span>
             </div>
             <div className="flex items-center gap-1.5">
-              <span className="text-xs text-gray-600">Magnus</span>
-              <span className="text-xs font-mono text-gray-400">{magnus}</span>
+              <span className={panelMeta}>Magnus</span>
+              <span className={`text-sm ${panelMono} text-gray-400`}>{magnus}</span>
             </div>
           </div>
         </div>
@@ -457,7 +461,7 @@ export default function TrajectoryGenRight({
 
       {/* Table header */}
       {group && (
-        <div className="flex-shrink-0 flex items-center gap-1 px-3 py-2 bg-gray-800/50 text-xs font-medium text-gray-500 border-b border-gray-700/60 select-none">
+        <div className={`flex-shrink-0 flex items-center gap-1 px-3 py-2 bg-gray-800/50 text-sm font-medium text-gray-500 border-b border-gray-700/60 select-none`}>
           <button className="flex-1 text-left hover:text-gray-300 transition-colors" onClick={() => handleSort('exitVelocity')}>
             Spd <SortIcon k="exitVelocity" />
           </button>
@@ -481,7 +485,7 @@ export default function TrajectoryGenRight({
       {group ? (
         <div className="overflow-y-auto min-h-0" style={{ height: `calc(${splitPct}% - 56px)` }}>
           {sorted.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-full text-gray-600 text-xs text-center px-4">
+            <div className={`flex flex-col items-center justify-center h-full text-gray-600 ${panelEmpty} px-4`}>
               <p>No trajectories in this group.</p>
             </div>
           ) : (
@@ -505,7 +509,7 @@ export default function TrajectoryGenRight({
                   onClick={() => { if (!activeCell) onSelectTraj(traj.id); }}
                   onMouseEnter={() => onHoverTraj(traj.id)}
                   onMouseLeave={() => onHoverTraj(null)}
-                  className={`relative flex items-center gap-1 px-3 py-2 cursor-pointer border-b transition-colors text-xs group ${
+                  className={`relative flex items-center gap-1 px-3 py-2 cursor-pointer border-b transition-colors text-sm group ${
                     isInvalid
                       ? isSelected
                         ? 'bg-red-900/40 border-b-red-900/60 border-l-2 border-l-red-400'
@@ -520,7 +524,7 @@ export default function TrajectoryGenRight({
                   }`}
                 >
                   {isInvalid && isHovered && invalidReason && (
-                    <div className="absolute left-2 -top-7 z-50 px-2 py-1 rounded bg-gray-950 border border-red-800/60 text-red-300 text-xs whitespace-nowrap shadow-lg pointer-events-none">
+                    <div className="absolute left-2 -top-7 z-50 px-2 py-1 rounded bg-gray-950 border border-red-800/60 text-red-300 text-sm whitespace-nowrap shadow-lg pointer-events-none">
                       {invalidReason}
                     </div>
                   )}
@@ -537,7 +541,7 @@ export default function TrajectoryGenRight({
                         if (e.key === 'Enter') { e.preventDefault(); commitCell(); }
                         if (e.key === 'Escape') { e.preventDefault(); setActiveCell(null); }
                       }}
-                      className="flex-1 font-mono bg-transparent border-b border-blue-400 text-blue-200 focus:outline-none min-w-0 text-xs"
+                      className={`flex-1 ${panelMono} bg-transparent border-b border-blue-400 text-blue-200 focus:outline-none min-w-0 text-sm`}
                     />
                   ) : (
                     <span
@@ -562,7 +566,7 @@ export default function TrajectoryGenRight({
                         if (e.key === 'Enter') { e.preventDefault(); commitCell(); }
                         if (e.key === 'Escape') { e.preventDefault(); setActiveCell(null); }
                       }}
-                      className="flex-1 font-mono bg-transparent border-b border-blue-400 text-blue-200 focus:outline-none min-w-0 text-xs"
+                      className={`flex-1 ${panelMono} bg-transparent border-b border-blue-400 text-blue-200 focus:outline-none min-w-0 text-sm`}
                     />
                   ) : (
                     <span
@@ -622,7 +626,7 @@ export default function TrajectoryGenRight({
           )}
         </div>
       ) : (
-        <div className="flex-1 flex items-center justify-center text-gray-600 text-xs text-center px-4">
+        <div className={`flex-1 flex items-center justify-center text-gray-600 ${panelEmpty} px-4`}>
           <p>Generate trajectories to get started.</p>
         </div>
       )}
@@ -642,45 +646,45 @@ export default function TrajectoryGenRight({
           </div>
 
           {/* Bottom controls */}
-          <div className="flex-1 border-gray-700 p-4 space-y-4 overflow-y-auto min-h-0">
+          <div className={`${panelContent} min-h-0`}>
 
             {/* Manual add */}
             <div className="space-y-2">
-              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-widest">Add Manually</h3>
+              <h3 className={panelSectionTitle}>Add Manually</h3>
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="text-xs text-gray-500 block mb-1">Speed (m/s)</label>
+                  <label className={panelLabel}>Speed (m/s)</label>
                   <FreeNumInput value={manualVel} step={0.1} min={0}
                     onChange={(v) => setManualVel(v)}
-                    className="w-full text-xs bg-gray-800 border border-gray-700 rounded-md px-2 py-1.5 text-white focus:outline-none focus:border-blue-500" />
+                    className={panelInput} />
                 </div>
                 <div>
-                  <label className="text-xs text-gray-500 block mb-1">Angle (deg)</label>
+                  <label className={panelLabel}>Angle (deg)</label>
                   <FreeNumInput value={manualAngle} step={0.5}
                     onChange={(v) => setManualAngle(v)}
-                    className="w-full text-xs bg-gray-800 border border-gray-700 rounded-md px-2 py-1.5 text-white focus:outline-none focus:border-blue-500" />
+                    className={panelInput} />
                 </div>
               </div>
               <button
                 onClick={handleAddManual}
-                className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-lg bg-gray-700 hover:bg-gray-600 text-white transition-colors"
+                className={`w-full ${panelBtnPrimary} bg-gray-700 hover:bg-gray-600 text-white`}
               >
-                <Plus size={13} />
+                <Plus size={14} />
                 Add Trajectory
               </button>
             </div>
 
             {/* Refine all */}
             <div className="space-y-2">
-              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-widest">Refine All Trajectories</h3>
+              <h3 className={panelSectionTitle}>Refine All Trajectories</h3>
               <div>
-                <label className="text-xs text-gray-500 block mb-1">Keep Constant</label>
+                <label className={panelLabel}>Keep Constant</label>
                 <div className="flex rounded-md overflow-hidden border border-gray-700">
                   {constModeOptions.map(opt => (
                     <button
                       key={opt.value}
                       onClick={() => setConstMode(opt.value)}
-                      className={`flex-1 text-xs py-1.5 transition-colors ${
+                      className={`flex-1 text-sm py-2 transition-colors ${
                         constMode === opt.value
                           ? 'bg-blue-600 text-white'
                           : 'bg-gray-800 text-gray-400 hover:text-gray-200 hover:bg-gray-700'
@@ -693,64 +697,64 @@ export default function TrajectoryGenRight({
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="text-xs text-gray-500 block mb-1">Max Iterations</label>
+                  <label className={panelLabel}>Max Iterations</label>
                   <FreeNumInput value={refineMaxIter} min={1} step={50}
                     onChange={(v) => setRefineMaxIter(Math.max(1, Math.round(v)))}
-                    className="w-full text-xs bg-gray-800 border border-gray-700 rounded-md px-2 py-1.5 text-white focus:outline-none focus:border-blue-500" />
+                    className={panelInput} />
                 </div>
                 <div>
-                  <label className="text-xs text-gray-500 block mb-1">Threshold (m)</label>
+                  <label className={panelLabel}>Threshold (m)</label>
                   <FreeNumInput value={refineThreshold} min={0.0001} step={0.0001}
                     onChange={(v) => setRefineThreshold(Math.max(0.0001, v))}
-                    className="w-full text-xs bg-gray-800 border border-gray-700 rounded-md px-2 py-1.5 text-white focus:outline-none focus:border-blue-500" />
+                    className={panelInput} />
                 </div>
               </div>
               <button
                 onClick={handleRefine}
                 disabled={refining || totalTrajectoryCount === 0}
-                className={`w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-lg transition-colors ${
+                className={`w-full ${panelBtnPrimary} ${
                   refining || totalTrajectoryCount === 0
                     ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
                     : 'bg-amber-600 hover:bg-amber-500 text-white'
                 }`}
               >
-                <RefreshCw size={13} className={refining ? 'animate-spin' : ''} />
+                <RefreshCw size={14} className={refining ? 'animate-spin' : ''} />
                 {refining ? 'Refining...' : 'Refine All Trajectories'}
               </button>
             </div>
 
             {/* Manage */}
             <div className="space-y-2">
-              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-widest">Manage</h3>
+              <h3 className={panelSectionTitle}>Manage</h3>
               <button
                 onClick={() => group && onUpdateGroup(group.id, trajectories.filter(t => t.accurate === true))}
                 disabled={trajectories.length === 0}
-                className={`w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-lg transition-colors ${
+                className={`w-full ${panelBtnPrimary} ${
                   trajectories.length === 0
                     ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
                     : 'bg-gray-700 hover:bg-gray-600 text-white'
                 }`}
               >
-                <Trash2 size={13} />
+                <Trash2 size={14} />
                 Delete Unsuccessful
               </button>
               <button
                 onClick={() => group && onUpdateGroup(group.id, [])}
                 disabled={trajectories.length === 0}
-                className={`w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-lg transition-colors ${
+                className={`w-full ${panelBtnPrimary} ${
                   trajectories.length === 0
                     ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
                     : 'bg-red-900/60 hover:bg-red-800/70 text-red-300 hover:text-red-200'
                 }`}
               >
-                <XCircle size={13} />
+                <XCircle size={14} />
                 Clear All
               </button>
             </div>
 
             {/* Import / Export */}
             <div className="space-y-2">
-              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-widest">Import / Export</h3>
+              <h3 className={panelSectionTitle}>Import / Export</h3>
               <input
                 ref={importInputRef}
                 type="file"
@@ -760,21 +764,21 @@ export default function TrajectoryGenRight({
               />
               <button
                 onClick={() => { setImportError(null); importInputRef.current?.click(); }}
-                className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-lg bg-blue-700 hover:bg-blue-600 text-white transition-colors"
+                className={`w-full ${panelBtnPrimary} bg-blue-700 hover:bg-blue-600 text-white`}
               >
-                <Upload size={13} />
+                <Upload size={14} />
                 Import JSON
               </button>
               {importError && (
-                <p className="text-xs text-red-400">{importError}</p>
+                <p className="text-sm text-red-400">{importError}</p>
               )}
               <div>
-                <label className="text-xs text-gray-500 block mb-1">Export File Name</label>
+                <label className={panelLabel}>Export File Name</label>
                 <input
                   type="text"
                   value={downloadName}
                   onChange={e => setDownloadName(e.target.value)}
-                  className="w-full text-xs bg-gray-800 border border-gray-700 rounded-md px-2 py-1.5 text-white focus:outline-none focus:border-blue-500"
+                  className={panelInput}
                   placeholder="trajectories"
                 />
               </div>
@@ -782,23 +786,23 @@ export default function TrajectoryGenRight({
                 type="button"
                 onClick={handleDownload}
                 disabled={totalTrajectoryCount === 0 || exporting}
-                className={`w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-lg transition-colors ${
+                className={`w-full ${panelBtnPrimary} ${
                   totalTrajectoryCount === 0 || exporting
                     ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
                     : 'bg-green-700 hover:bg-green-600 text-white'
                 }`}
               >
-                <Download size={13} className={exporting ? 'animate-pulse' : ''} />
+                <Download size={14} className={exporting ? 'animate-pulse' : ''} />
                 {exporting ? 'Exporting...' : 'Download All Trajectories'}
               </button>
               {exportMessage && (
-                <p className={`text-xs leading-snug ${exportMessage.ok ? 'text-green-400' : 'text-red-400'}`}>
+                <p className={`text-sm leading-snug ${exportMessage.ok ? 'text-green-400' : 'text-red-400'}`}>
                   {exportMessage.text}
                 </p>
               )}
-              <p className="text-xs text-gray-600 leading-snug">
+              <p className={panelHint}>
                 Exports one JSON per goal tab as{' '}
-                <span className="font-mono text-gray-500">name (dx, dy).json</span>
+                <span className={`${panelMono} text-gray-400`}>name (dx, dy).json</span>
               </p>
             </div>
           </div>

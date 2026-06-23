@@ -1,7 +1,11 @@
-import { useRef, useState, useEffect, useMemo } from 'react';
+import { useRef, useState, useEffect } from 'react';
 import { Eye, EyeOff, Crosshair, Target, Zap, X } from 'lucide-react';
 import { SimulationParams, TrajectoryPoint, Meterstick } from '../types';
-import { fitDragMagnusAsync, speedBetweenPoints } from '../simulation';
+import { fitDragMagnusAsync } from '../simulation';
+import {
+  panelAside, panelContent, panelSectionTitle, panelLabel, panelBody, panelHint,
+  panelInput, panelInputNumeric, panelBtnPrimary, panelLabelInline,
+} from './panelStyles';
 
 interface Props {
   params: SimulationParams;
@@ -11,14 +15,12 @@ interface Props {
   meterstick: Meterstick;
   framerate: number;
   onChange: (p: SimulationParams) => void;
-  onFramerateChange: (fps: number) => void;
   onToggleShow: () => void;
   pickingExitPos: boolean;
   onStartPickExitPos: () => void;
   width: number;
 }
 
-type PanelTab = 'empirical' | 'simulation';
 
 interface SliderRowProps {
   label: string;
@@ -28,36 +30,6 @@ interface SliderRowProps {
   max: number;
   step: number;
   onChange: (v: number) => void;
-}
-
-function FramerateInput({ value, onChange }: { value: number; onChange: (v: number) => void }) {
-  const [raw, setRaw] = useState(String(value));
-  const [focused, setFocused] = useState(false);
-
-  useEffect(() => {
-    if (!focused) setRaw(String(value));
-  }, [value, focused]);
-
-  function commit(str: string) {
-    const stripped = str.replace(/[^0-9.\-]/g, '');
-    let n = parseFloat(stripped);
-    if (isNaN(n) || n <= 0) n = value > 0 ? value : 30;
-    setRaw(String(n));
-    onChange(n);
-  }
-
-  return (
-    <input
-      type="text"
-      inputMode="decimal"
-      value={raw}
-      onChange={(e) => setRaw(e.target.value)}
-      onFocus={() => setFocused(true)}
-      onBlur={(e) => { setFocused(false); commit(e.target.value); }}
-      onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
-      className="w-full text-xs bg-gray-800 border border-gray-600 rounded-md px-2 py-1.5 text-white focus:outline-none focus:border-blue-500"
-    />
-  );
 }
 
 function IntInput({ label, value, onChange }: { label: string; value: number; onChange: (v: number) => void }) {
@@ -77,7 +49,7 @@ function IntInput({ label, value, onChange }: { label: string; value: number; on
 
   return (
     <div className="flex-1">
-      <label className="text-xs text-gray-500 block mb-1">{label}</label>
+      <label className={panelLabel}>{label}</label>
       <input
         type="text"
         inputMode="numeric"
@@ -86,7 +58,7 @@ function IntInput({ label, value, onChange }: { label: string; value: number; on
         onFocus={() => setFocused(true)}
         onBlur={(e) => { setFocused(false); commit(e.target.value); }}
         onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
-        className="w-full text-xs bg-gray-800 border border-gray-600 rounded-md px-2 py-1.5 text-white focus:outline-none focus:border-blue-500"
+        className={panelInput}
       />
     </div>
   );
@@ -112,7 +84,7 @@ function SliderRow({ label, unit, value, min, max, step, onChange }: SliderRowPr
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between gap-2">
-        <label className="text-xs font-medium text-gray-300 flex-shrink-0">{label}</label>
+        <label className={panelLabelInline}>{label}</label>
         <div className="flex items-center gap-1">
           <input
             type="text"
@@ -122,9 +94,9 @@ function SliderRow({ label, unit, value, min, max, step, onChange }: SliderRowPr
             onFocus={() => setFocused(true)}
             onBlur={(e) => { setFocused(false); commit(e.target.value); }}
             onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
-            className="w-20 text-xs text-right bg-gray-800 border border-gray-600 rounded-md px-2 py-1 text-white focus:outline-none focus:border-blue-500"
+            className={panelInputNumeric}
           />
-          <span className="text-xs text-gray-500 w-8">{unit}</span>
+          <span className={`${panelHint} w-8`}>{unit}</span>
         </div>
       </div>
       <input
@@ -148,19 +120,17 @@ export default function SimulationControls({
   meterstick,
   framerate,
   onChange,
-  onFramerateChange,
   onToggleShow,
   pickingExitPos,
   onStartPickExitPos,
   width,
 }: Props) {
-  const [panelTab, setPanelTab] = useState<PanelTab>('empirical');
   const [fitStatus, setFitStatus] = useState<'idle' | 'running' | 'ok' | 'fail'>('idle');
   const [fitRmse, setFitRmse] = useState<number | null>(null);
   const [fitProgress, setFitProgress] = useState(0);
   const cancelRef = useRef<{ cancelled: boolean } | null>(null);
 
-  function set(key: keyof SimulationParams, val: number) {
+  function setParam(key: keyof SimulationParams, val: number) {
     onChange({ ...params, [key]: val });
   }
 
@@ -213,115 +183,23 @@ export default function SimulationControls({
     setFitProgress(0);
   }
 
-  const dt = framerate > 0 ? 1 / framerate : null;
-
-  const sortedTrajectory = useMemo(
-    () => [...trajectory].sort((a, b) => a.frame - b.frame),
-    [trajectory]
-  );
-
-  const exitSpeed = useMemo(() => {
-    if (sortedTrajectory.length < 2) return null;
-    return speedBetweenPoints(sortedTrajectory[0], sortedTrajectory[1], meterstick.length, framerate);
-  }, [sortedTrajectory, meterstick.length, framerate]);
-
-  const panelTabs: { id: PanelTab; label: string }[] = [
-    { id: 'empirical', label: 'Empirical Testing' },
-    { id: 'simulation', label: 'Simulation' },
-  ];
-
   return (
-    <aside className="flex flex-col bg-gray-900 border-l border-gray-700 h-full overflow-hidden" style={{ width }}>
-      {/* Panel tabs */}
-      <div className="flex-shrink-0 flex border-b border-gray-700">
-        {panelTabs.map((t) => (
-          <button
-            key={t.id}
-            onClick={() => setPanelTab(t.id)}
-            className={`flex-1 px-2 py-2.5 text-xs font-medium transition-colors border-b-2 -mb-px ${
-              panelTab === t.id
-                ? 'border-blue-500 text-blue-400 bg-gray-900'
-                : 'border-transparent text-gray-500 hover:text-gray-300 hover:bg-gray-800/50'
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
-
-      <div className="flex-1 overflow-y-auto p-4 space-y-5">
-      {panelTab === 'empirical' && (
-        <div className="space-y-5">
-          <div>
-            <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-widest mb-4">
-              Empirical Testing
-            </h2>
-            <p className="text-xs text-gray-500 leading-relaxed mb-4">
-              Set the video framerate and calibrate the yellow meterstick on the video.
-              Exit speed is estimated from the first two plotted trajectory points.
-            </p>
-          </div>
-
-          <div>
-            <label className="text-xs text-gray-500 block mb-1">Framerate (fps)</label>
-            <FramerateInput value={framerate} onChange={onFramerateChange} />
-          </div>
-
-          <div>
-            <label className="text-xs text-gray-500 block mb-1">dt (s)</label>
-            <div className="w-full text-xs bg-gray-800/60 border border-gray-700 rounded-md px-2 py-1.5 text-gray-300 font-mono tabular-nums">
-              {dt !== null ? dt.toFixed(6) : '—'}
-            </div>
-            <p className="text-xs text-gray-600 mt-1">dt = 1 / framerate</p>
-          </div>
-
-          <div className="pt-2 border-t border-gray-700">
-            <label className="text-xs text-gray-500 block mb-1">Calculated Exit Speed</label>
-            <div className="flex items-baseline gap-2">
-              <span className="text-2xl font-mono font-semibold tabular-nums text-white">
-                {exitSpeed !== null ? exitSpeed.toFixed(2) : '—'}
-              </span>
-              {exitSpeed !== null && (
-                <span className="text-xs text-gray-500">m/s</span>
-              )}
-            </div>
-            {exitSpeed === null && (
-              <p className="text-xs text-gray-600 mt-2 leading-snug">
-                {trajectory.length < 2
-                  ? 'Plot at least 2 trajectory points on consecutive frames.'
-                  : meterstick.length <= 0
-                  ? 'Drag the meterstick on the video to set the 1 m scale.'
-                  : framerate <= 0
-                  ? 'Enter a valid framerate.'
-                  : 'Could not compute — check that the first two points are on different frames.'}
-              </p>
-            )}
-            {exitSpeed !== null && sortedTrajectory.length >= 2 && (
-              <p className="text-xs text-gray-600 mt-2 leading-snug">
-                From frames {sortedTrajectory[0].frame + 1} → {sortedTrajectory[1].frame + 1}
-                {' '}({((sortedTrajectory[1].frame - sortedTrajectory[0].frame) / framerate * 1000).toFixed(1)} ms)
-              </p>
-            )}
-          </div>
-        </div>
-      )}
-
-      {panelTab === 'simulation' && (
-      <>
+    <aside className={`${panelAside} border-l border-gray-700`} style={{ width }}>
+      <div className={panelContent}>
       <div>
-        <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-widest mb-4">
+        <h2 className={`${panelSectionTitle} mb-4`}>
           Simulation
         </h2>
 
         <button
           onClick={onToggleShow}
-          className={`w-full flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium rounded-lg transition-colors mb-5 ${
+          className={`w-full ${panelBtnPrimary} mb-5 ${
             showSimulation
               ? 'bg-green-600 hover:bg-green-500 text-white'
               : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
           }`}
         >
-          {showSimulation ? <Eye size={15} /> : <EyeOff size={15} />}
+          {showSimulation ? <Eye size={16} /> : <EyeOff size={16} />}
           {showSimulation ? 'Hide Simulation' : 'Show Simulation'}
         </button>
 
@@ -333,7 +211,7 @@ export default function SimulationControls({
             min={0}
             max={30}
             step={0.1}
-            onChange={(v) => set('exitVelocity', v)}
+            onChange={(v) => setParam('exitVelocity', v)}
           />
           <SliderRow
             label="Exit Angle"
@@ -342,7 +220,7 @@ export default function SimulationControls({
             min={-90}
             max={90}
             step={0.5}
-            onChange={(v) => set('exitAngle', v)}
+            onChange={(v) => setParam('exitAngle', v)}
           />
           <SliderRow
             label="Drag Coefficient"
@@ -351,7 +229,7 @@ export default function SimulationControls({
             min={0}
             max={1}
             step={0.001}
-            onChange={(v) => set('dragCoefficient', v)}
+            onChange={(v) => setParam('dragCoefficient', v)}
           />
           <SliderRow
             label="Magnus Coefficient"
@@ -360,23 +238,22 @@ export default function SimulationControls({
             min={0}
             max={2}
             step={0.001}
-            onChange={(v) => set('magnusGain', v)}
+            onChange={(v) => setParam('magnusGain', v)}
           />
         </div>
 
-        {/* Fit button */}
         <div className="mt-5 space-y-2">
           <div className="flex gap-2">
             <button
               onClick={handleFit}
               disabled={!canFit || fitStatus === 'running'}
-              className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium rounded-lg transition-colors ${
+              className={`flex-1 ${panelBtnPrimary} ${
                 canFit && fitStatus !== 'running'
                   ? 'bg-blue-600 hover:bg-blue-500 text-white'
                   : 'bg-gray-800 text-gray-500 cursor-not-allowed'
               }`}
             >
-              <Zap size={15} className={fitStatus === 'running' ? 'animate-pulse' : ''} />
+              <Zap size={16} className={fitStatus === 'running' ? 'animate-pulse' : ''} />
               {fitStatus === 'running' ? 'Fitting...' : 'Fit to Trajectory'}
             </button>
             {fitStatus === 'running' && (
@@ -398,14 +275,14 @@ export default function SimulationControls({
                   style={{ width: `${Math.round(fitProgress * 100)}%` }}
                 />
               </div>
-              <p className="text-xs text-gray-500 text-center tabular-nums">
+              <p className={`${panelHint} text-center tabular-nums`}>
                 {Math.round(fitProgress * 100)}% complete
               </p>
             </div>
           )}
 
           {fitStatus !== 'running' && !canFit && (
-            <p className="text-xs text-gray-600 text-center leading-snug">
+            <p className={`${panelHint} text-center`}>
               {trajectory.length < 3
                 ? `Need ${3 - trajectory.length} more plotted point${3 - trajectory.length === 1 ? '' : 's'}`
                 : !hasExitPos
@@ -418,63 +295,59 @@ export default function SimulationControls({
             </p>
           )}
           {fitStatus === 'ok' && fitRmse !== null && (
-            <p className="text-xs text-green-400 text-center">
+            <p className="text-sm text-green-400 text-center">
               Fit complete · RMSE {(fitRmse * 100).toFixed(1)} cm
             </p>
           )}
           {fitStatus === 'fail' && (
-            <p className="text-xs text-red-400 text-center">
+            <p className="text-sm text-red-400 text-center">
               Could not fit — check launch point and scale
             </p>
           )}
         </div>
       </div>
 
-      {/* Exit position */}
       <div className="pt-4 border-t border-gray-700 space-y-3">
         <div className="flex items-center justify-between">
-          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-widest">
+          <h3 className={panelSectionTitle}>
             Launch Point
           </h3>
           <Target
-            size={15}
+            size={16}
             className={hasExitPos ? 'text-green-400' : 'text-gray-600'}
           />
         </div>
-        <p className="text-xs text-gray-500 leading-relaxed">
-          Click "Pick on Video" then click the frame where the ball exits the robot.
+        <p className={panelBody}>
+          Click &quot;Pick on Video&quot; then click the frame where the ball exits the robot.
         </p>
         <button
           onClick={onStartPickExitPos}
-          className={`w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium rounded-lg transition-colors ${
+          className={`w-full ${panelBtnPrimary} ${
             pickingExitPos
               ? 'bg-green-600 text-white hover:bg-green-500'
               : 'bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white'
           }`}
         >
-          <Crosshair size={13} />
+          <Crosshair size={14} />
           {pickingExitPos ? 'Click on Video...' : 'Pick on Video'}
         </button>
         <div className="flex gap-2">
-          <IntInput label="X (px)" value={Math.round(params.exitX)} onChange={(n) => set('exitX', n)} />
-          <IntInput label="Y (px)" value={Math.round(params.exitY)} onChange={(n) => set('exitY', n)} />
+          <IntInput label="X (px)" value={Math.round(params.exitX)} onChange={(n) => setParam('exitX', n)} />
+          <IntInput label="Y (px)" value={Math.round(params.exitY)} onChange={(n) => setParam('exitY', n)} />
         </div>
       </div>
 
-      {/* Physics info */}
       <div className="pt-4 border-t border-gray-700 space-y-2">
-        <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-widest">Physics</h3>
-        <p className="text-xs text-gray-500 leading-relaxed">
+        <h3 className={panelSectionTitle}>Physics</h3>
+        <p className={panelBody}>
           g = 9.81 m/s²<br />
           F<sub>drag</sub> = b · v²<br />
           dt = 5 ms timestep
         </p>
-        <p className="text-xs text-gray-500 leading-relaxed">
+        <p className={panelBody}>
           Drag the yellow meterstick on the video to calibrate the 1-meter scale.
         </p>
       </div>
-      </>
-      )}
       </div>
     </aside>
   );

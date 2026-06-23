@@ -1,21 +1,24 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { VideoData, TrajectoryPoint, Meterstick, SimulationParams, GeneratedTrajectory, TrajGenParams, TrajGroup } from './types';
-import VideoSidebar from './components/VideoSidebar';
+import SysIdSidebar from './components/SysIdSidebar';
 import VideoDisplay from './components/VideoDisplay';
 import SimulationControls from './components/SimulationControls';
 import TrajectoryGenCanvas from './components/TrajectoryGenCanvas';
 import TrajectoryGenLeft from './components/TrajectoryGenLeft';
 import TrajectoryGenRight from './components/TrajectoryGenRight';
 import { generateTrajectories, refineGroupTrajectories } from './simulation';
+import { buildTrajectorySegments, activeSegmentAtFrame } from './utils/trajectorySegments';
 
 const LEFT_MIN = 160;
 const LEFT_MAX = 480;
-const LEFT_DEFAULT = 256;
+const LEFT_DEFAULT = Math.round(256 * 1.3 * 0.9);
 
 const RIGHT_MIN = 220;
 const RIGHT_MAX = 520;
 const RIGHT_DEFAULT = 310;
+
+const MAX_TRAJECTORY_HISTORY = 10;
 
 type Tab = 'trajgen' | 'sysid';
 
@@ -80,6 +83,19 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [pickingExitPos, setPickingExitPos] = useState(false);
 
+  // Trajectory annotation UI state (sysid)
+  const [plottingMode, setPlottingMode] = useState(false);
+  const [showAllTrajectories, setShowAllTrajectories] = useState(true);
+  const [focusedTrajectoryId, setFocusedTrajectoryId] = useState<string | null>(null);
+  const [totalFrames, setTotalFrames] = useState(1);
+  const undoStack = useRef<TrajectoryPoint[][]>([]);
+  const redoStack = useRef<TrajectoryPoint[][]>([]);
+  const frameHoldRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const currentFrameRef = useRef(0);
+  const totalFramesRef = useRef(1);
+  const [, setHistoryTick] = useState(0);
+  const bumpHistory = () => setHistoryTick((n) => n + 1);
+
   // Trajectory generation state
   const [trajGenParams, setTrajGenParams] = useState<TrajGenParams>(DEFAULT_TRAJGEN_PARAMS);
   const [trajGroups, setTrajGroups] = useState<TrajGroup[]>([]);
@@ -126,6 +142,34 @@ export default function App() {
   const selectedVideo = videos.find((v) => v.id === selectedId) ?? null;
   const selectedGroup = trajGroups.find(g => g.id === selectedGroupId) ?? trajGroups[0] ?? null;
 
+  currentFrameRef.current = selectedVideo?.currentFrame ?? 0;
+  totalFramesRef.current = totalFrames;
+
+  const trajectorySegments = useMemo(
+    () => (selectedVideo ? buildTrajectorySegments(selectedVideo.trajectory) : []),
+    [selectedVideo]
+  );
+
+  const activeTrajectoryPoints = useMemo(() => {
+    if (!selectedVideo) return [];
+    const atFrame = activeSegmentAtFrame(trajectorySegments, selectedVideo.currentFrame);
+    if (atFrame) return atFrame.points;
+    const focused = trajectorySegments.find((s) => s.id === focusedTrajectoryId);
+    if (focused) return focused.points;
+    return [];
+  }, [selectedVideo, trajectorySegments, focusedTrajectoryId]);
+
+  useEffect(() => {
+    undoStack.current = [];
+    redoStack.current = [];
+    setFocusedTrajectoryId(null);
+    setPlottingMode(false);
+  }, [selectedId]);
+
+  useEffect(() => () => {
+    if (frameHoldRef.current) clearInterval(frameHoldRef.current);
+  }, []);
+
   function updateVideo(id: string, patch: Partial<VideoData>) {
     setVideos((prev) => prev.map((v) => (v.id === id ? { ...v, ...patch } : v)));
   }
@@ -159,6 +203,89 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [selectedId]
   );
+
+  const pushUndo = useCallback((current: TrajectoryPoint[]) => {
+    undoStack.current = [...undoStack.current.slice(-MAX_TRAJECTORY_HISTORY + 1), [...current]];
+    redoStack.current = [];
+    bumpHistory();
+  }, []);
+
+  const handleUndo = useCallback(() => {
+    if (!selectedVideo || undoStack.current.length === 0) return;
+    redoStack.current = [[...selectedVideo.trajectory], ...redoStack.current.slice(0, MAX_TRAJECTORY_HISTORY - 1)];
+    const prev = undoStack.current[undoStack.current.length - 1];
+    undoStack.current = undoStack.current.slice(0, -1);
+    handleTrajectoryUpdate(prev);
+    bumpHistory();
+  }, [selectedVideo, handleTrajectoryUpdate]);
+
+  const handleRedo = useCallback(() => {
+    if (!selectedVideo || redoStack.current.length === 0) return;
+    undoStack.current = [...undoStack.current.slice(-MAX_TRAJECTORY_HISTORY + 1), [...selectedVideo.trajectory]];
+    const next = redoStack.current[0];
+    redoStack.current = redoStack.current.slice(1);
+    handleTrajectoryUpdate(next);
+    bumpHistory();
+  }, [selectedVideo, handleTrajectoryUpdate]);
+
+  const handleDeleteCurrentPoint = useCallback(() => {
+    if (!selectedVideo) return;
+    const hasPoint = selectedVideo.trajectory.some((p) => p.frame === selectedVideo.currentFrame);
+    if (!hasPoint) return;
+    pushUndo(selectedVideo.trajectory);
+    handleTrajectoryUpdate(selectedVideo.trajectory.filter((p) => p.frame !== selectedVideo.currentFrame));
+  }, [selectedVideo, pushUndo, handleTrajectoryUpdate]);
+
+  const handleClearAllPoints = useCallback(() => {
+    if (!selectedVideo) return;
+    pushUndo(selectedVideo.trajectory);
+    handleTrajectoryUpdate([]);
+    setFocusedTrajectoryId(null);
+  }, [selectedVideo, pushUndo, handleTrajectoryUpdate]);
+
+  const handleLoadTrajectory = useCallback(
+    (videoId: string, points: TrajectoryPoint[]) => {
+      const video = videos.find((v) => v.id === videoId);
+      if (!video) return;
+      if (videoId === selectedId) pushUndo(video.trajectory);
+      updateVideo(videoId, { trajectory: points });
+      setSelectedId(videoId);
+      setFocusedTrajectoryId(null);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [videos, selectedId, pushUndo]
+  );
+
+  const handleStepFrame = useCallback(
+    (delta: number) => {
+      if (!selectedId) return;
+      const next = Math.min(totalFramesRef.current - 1, Math.max(0, currentFrameRef.current + delta));
+      updateVideo(selectedId, { currentFrame: next });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selectedId]
+  );
+
+  const handleStartFrameHold = useCallback(
+    (dir: number) => {
+      if (frameHoldRef.current) clearInterval(frameHoldRef.current);
+      frameHoldRef.current = setInterval(() => handleStepFrame(dir), 60);
+    },
+    [handleStepFrame]
+  );
+
+  const handleStopFrameHold = useCallback(() => {
+    if (frameHoldRef.current) {
+      clearInterval(frameHoldRef.current);
+      frameHoldRef.current = null;
+    }
+  }, []);
+
+  const canUndo = undoStack.current.length > 0;
+  const canRedo = redoStack.current.length > 0;
+  const canDeleteCurrentPoint = selectedVideo
+    ? selectedVideo.trajectory.some((p) => p.frame === selectedVideo.currentFrame)
+    : false;
 
   const handleMetastickUpdate = useCallback(
     (m: Meterstick) => {
@@ -322,13 +449,34 @@ export default function App() {
               className={`flex-shrink-0 overflow-hidden ${isDragging ? '' : 'transition-[width] duration-200'}`}
               style={{ width: leftOpen ? leftWidth : 0 }}
             >
-              <VideoSidebar
+              <SysIdSidebar
                 videos={videos}
+                selectedVideo={selectedVideo}
                 selectedId={selectedId}
                 onSelect={(id) => { setSelectedId(id); setPickingExitPos(false); }}
                 onUpload={handleUpload}
                 onDelete={handleDelete}
                 width={leftWidth}
+                plottingMode={plottingMode}
+                onPlottingModeChange={setPlottingMode}
+                showAllTrajectories={showAllTrajectories}
+                onShowAllTrajectoriesChange={setShowAllTrajectories}
+                focusedTrajectoryId={focusedTrajectoryId}
+                onFocusedTrajectoryChange={setFocusedTrajectoryId}
+                onTrajectoryUpdate={(points) => { pushUndo(selectedVideo?.trajectory ?? []); handleTrajectoryUpdate(points); }}
+                onFrameChange={handleFrameChange}
+                framerate={selectedVideo?.framerate ?? 30}
+                onFramerateChange={handleFramerateChange}
+                meterstick={selectedVideo?.meterstick ?? { x: 80, y: 680, length: 160 }}
+                canUndo={canUndo}
+                canRedo={canRedo}
+                onUndo={handleUndo}
+                onRedo={handleRedo}
+                onDeleteCurrentPoint={handleDeleteCurrentPoint}
+                onClearAllPoints={handleClearAllPoints}
+                canDeleteCurrentPoint={canDeleteCurrentPoint}
+                pickingExitPos={pickingExitPos}
+                onLoadTrajectory={handleLoadTrajectory}
               />
             </div>
 
@@ -360,8 +508,19 @@ export default function App() {
                   onTrajectoryUpdate={handleTrajectoryUpdate}
                   onMetastickUpdate={handleMetastickUpdate}
                   onFrameChange={handleFrameChange}
+                  onTotalFramesChange={setTotalFrames}
                   pickingExitPos={pickingExitPos}
                   onExitPosPicked={handleExitPosPicked}
+                  plottingMode={plottingMode}
+                  showAllTrajectories={showAllTrajectories}
+                  focusedTrajectoryId={focusedTrajectoryId}
+                  onPushUndo={pushUndo}
+                  onUndo={handleUndo}
+                  onRedo={handleRedo}
+                  onDeleteCurrentPoint={handleDeleteCurrentPoint}
+                  onStepFrame={handleStepFrame}
+                  onStartFrameHold={handleStartFrameHold}
+                  onStopFrameHold={handleStopFrameHold}
                 />
               ) : (
                 <>
@@ -417,11 +576,10 @@ export default function App() {
                   params={selectedVideo.simulationParams}
                   hasExitPos={selectedVideo.hasExitPos}
                   showSimulation={selectedVideo.showSimulation}
-                  trajectory={selectedVideo.trajectory}
+                  trajectory={activeTrajectoryPoints}
                   meterstick={selectedVideo.meterstick}
                   framerate={selectedVideo.framerate}
                   onChange={handleSimParamsChange}
-                  onFramerateChange={handleFramerateChange}
                   onToggleShow={handleToggleSimulation}
                   pickingExitPos={pickingExitPos}
                   onStartPickExitPos={() => setPickingExitPos((v) => !v)}

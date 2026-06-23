@@ -1,6 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { TrajGenParams } from '../types';
 import { Play, Loader } from 'lucide-react';
+import {
+  panelAside, panelContent, panelSectionTitle, panelSubsectionTitle, panelLabel,
+  panelLabelInline, panelInput, panelBody, panelHint, panelBtnPrimary, panelMeta,
+} from './panelStyles';
 
 interface Props {
   params: TrajGenParams;
@@ -44,7 +48,7 @@ function RangeInput({ label, value, step, min, max, onCommit }: {
 
   return (
     <div className="flex-1">
-      <label className="text-xs text-gray-500 block mb-1">{label}</label>
+      <label className={panelLabel}>{label}</label>
       <input
         type="text"
         inputMode="decimal"
@@ -53,7 +57,7 @@ function RangeInput({ label, value, step, min, max, onCommit }: {
         onFocus={() => setFocused(true)}
         onBlur={(e) => { setFocused(false); commit(e.target.value); }}
         onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
-        className="w-full text-xs bg-gray-800 border border-gray-700 rounded-md px-2 py-1.5 text-white focus:outline-none focus:border-blue-500"
+        className={panelInput}
       />
     </div>
   );
@@ -113,10 +117,10 @@ function RangeRow({ label, unit, min, max, step, valMin, valMax, onChangeMin, on
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
-        <label className="text-xs font-semibold text-gray-300">{label}</label>
-        <span className="text-xs text-gray-500">{unit}</span>
+        <label className={panelLabelInline}>{label}</label>
+        <span className={panelMeta}>{unit}</span>
       </div>
-      <div className="flex justify-between text-xs text-gray-600 mb-1">
+      <div className={`flex justify-between ${panelMeta} mb-1`}>
         <span>{min}</span>
         <span>{max}</span>
       </div>
@@ -179,8 +183,8 @@ function NumInput({ label, unit, value, step, min, max, onChange }: {
   return (
     <div className="space-y-1">
       <div className="flex items-center justify-between">
-        <label className="text-xs font-medium text-gray-400">{label}</label>
-        {unit && <span className="text-xs text-gray-600">{unit}</span>}
+        <label className={panelSubsectionTitle}>{label}</label>
+        {unit && <span className={panelMeta}>{unit}</span>}
       </div>
       <input
         type="text"
@@ -191,7 +195,7 @@ function NumInput({ label, unit, value, step, min, max, onChange }: {
         onFocus={() => setFocused(true)}
         onBlur={(e) => { setFocused(false); commit(e.target.value); }}
         onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
-        className="w-full text-xs bg-gray-800 border border-gray-700 rounded-md px-3 py-1.5 text-white focus:outline-none focus:border-blue-500"
+        className={panelInput}
       />
     </div>
   );
@@ -213,9 +217,9 @@ export default function TrajectoryGenLeft({ params, onChange, onGenerate, genera
   }
 
   return (
-    <aside className="flex flex-col bg-gray-900 border-r border-gray-700 h-full overflow-y-auto" style={{ width }}>
-      <div className="p-4 space-y-5">
-        <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-widest">Scene Setup</h2>
+    <aside className={`${panelAside} border-r border-gray-700 overflow-y-auto`} style={{ width }}>
+      <div className={panelContent}>
+        <h2 className={panelSectionTitle}>Scene Setup</h2>
 
         {/* Scene Setup */}
         <div className="space-y-3">
@@ -231,7 +235,7 @@ export default function TrajectoryGenLeft({ params, onChange, onGenerate, genera
           <NumInput label="Distance Step" unit="m" value={params.dxStep} step={0.1} min={0.1}
             onChange={(v) => onChange({ ...params, dxStep: Math.max(0.1, v) })} />
           {dxValues.length > 0 && (
-            <p className="text-xs text-gray-600">
+            <p className={panelHint}>
               {dxValues.length === 1
                 ? `1 distance: ${dxValues[0].toFixed(2)} m`
                 : `${dxValues.length} distances: ${dxValues[0].toFixed(2)} → ${dxValues[dxValues.length - 1].toFixed(2)} m`}
@@ -249,7 +253,7 @@ export default function TrajectoryGenLeft({ params, onChange, onGenerate, genera
 
         <div className="border-t border-gray-700" />
 
-        <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-widest">Search Parameters</h2>
+        <h2 className={panelSectionTitle}>Search Parameters</h2>
 
         {/* Exit Angle Range */}
         <RangeRow
@@ -283,7 +287,7 @@ export default function TrajectoryGenLeft({ params, onChange, onGenerate, genera
 
         {/* Step Sizes */}
         <div className="space-y-3">
-          <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wide">Step Sizes</h3>
+          <h3 className={panelSubsectionTitle}>Step Sizes</h3>
           <NumInput label="Angle Step" unit="deg" value={params.angleStep} step={0.1} min={0.1}
             onChange={(v) => set('angleStep', Math.max(0.1, v))} />
           <NumInput label="Velocity Step" unit="m/s" value={params.velocityStep} step={0.01} min={0.01}
@@ -294,18 +298,18 @@ export default function TrajectoryGenLeft({ params, onChange, onGenerate, genera
         <button
           onClick={onGenerate}
           disabled={generating}
-          className={`w-full flex items-center justify-center gap-2 px-4 py-3 text-sm font-semibold rounded-lg transition-colors ${
+          className={`w-full ${panelBtnPrimary} font-semibold ${
             generating
               ? 'bg-gray-700 text-gray-400 cursor-not-allowed'
               : 'bg-blue-600 hover:bg-blue-500 text-white'
           }`}
         >
-          {generating ? <Loader size={15} className="animate-spin" /> : <Play size={15} />}
+          {generating ? <Loader size={16} className="animate-spin" /> : <Play size={16} />}
           {generating ? 'Generating & Refining...' : 'Generate Trajectories'}
         </button>
 
         {/* Estimated count hint */}
-        <p className="text-xs text-gray-600 text-center">
+        <p className={`${panelHint} text-center`}>
           {Math.round((params.exitAngleMax - params.exitAngleMin) / params.angleStep + 1) *
            Math.round((params.velocityMax - params.velocityMin) / params.velocityStep + 1)} combinations × {dxValues.length} distance{dxValues.length !== 1 ? 's' : ''}
         </p>

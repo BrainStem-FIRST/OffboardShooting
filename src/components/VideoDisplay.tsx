@@ -1,15 +1,27 @@
-import { useRef, useEffect, useState, useCallback } from 'react';
-import { ChevronLeft, ChevronRight, Crosshair, RotateCcw, Save, Upload } from 'lucide-react';
+import { useRef, useEffect, useState, useCallback, useMemo } from 'react';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { VideoData, TrajectoryPoint, Meterstick } from '../types';
 import { simulateShot } from '../simulation';
+import { buildTrajectorySegments, activeSegmentAtFrame } from '../utils/trajectorySegments';
 
 interface Props {
   video: VideoData;
   onTrajectoryUpdate: (points: TrajectoryPoint[]) => void;
   onMetastickUpdate: (m: Meterstick) => void;
   onFrameChange: (frame: number) => void;
+  onTotalFramesChange: (total: number) => void;
   pickingExitPos: boolean;
   onExitPosPicked: (x: number, y: number) => void;
+  plottingMode: boolean;
+  showAllTrajectories: boolean;
+  focusedTrajectoryId: string | null;
+  onPushUndo: (current: TrajectoryPoint[]) => void;
+  onUndo: () => void;
+  onRedo: () => void;
+  onDeleteCurrentPoint: () => void;
+  onStepFrame: (delta: number) => void;
+  onStartFrameHold: (dir: number) => void;
+  onStopFrameHold: () => void;
 }
 
 function getContainBox(vid: HTMLVideoElement): { x: number; y: number; w: number; h: number } {
@@ -25,42 +37,135 @@ function getContainBox(vid: HTMLVideoElement): { x: number; y: number; w: number
   return { x: (dw - renderW) / 2, y: (dh - renderH) / 2, w: renderW, h: renderH };
 }
 
-const MAX_HISTORY = 10;
-type Tab = 'trajectory' | 'save';
+function hexToRgba(hex: string, alpha: number): string {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 4;
+const ZOOM_WHEEL_FACTOR = 1.1;
+
+function clampZoom(z: number) {
+  return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, z));
+}
+
+function scrubSegmentStyle(frameStart: number, frameEnd: number, totalFrames: number) {
+  if (totalFrames <= 1) return { left: '0%', width: '100%' };
+  const span = totalFrames - 1;
+  const leftPct = (frameStart / span) * 100;
+  let widthPct = ((frameEnd - frameStart) / span) * 100;
+  const minPct = 100 / totalFrames;
+  if (widthPct < minPct) widthPct = minPct;
+  return { left: `${leftPct}%`, width: `${widthPct}%` };
+}
 
 export default function VideoDisplay({
   video,
   onTrajectoryUpdate,
   onMetastickUpdate,
   onFrameChange,
+  onTotalFramesChange,
   pickingExitPos,
   onExitPosPicked,
+  plottingMode,
+  showAllTrajectories,
+  focusedTrajectoryId,
+  onPushUndo,
+  onUndo,
+  onRedo,
+  onDeleteCurrentPoint,
+  onStepFrame,
+  onStartFrameHold,
+  onStopFrameHold,
 }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const loadInputRef = useRef<HTMLInputElement>(null);
 
   const [duration, setDuration] = useState(0);
   const [fps] = useState(30);
-  const [plottingMode, setPlottingMode] = useState(false);
   const [hoveredZone, setHoveredZone] = useState<null | 'left' | 'right' | 'body'>(null);
   const [draggingZone, setDraggingZone] = useState<null | 'left' | 'right' | 'body'>(null);
   const dragStartRef = useRef<{ mx: number; my: number; stickSnap: Meterstick } | null>(null);
-  const frameHoldRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const currentFrameRef = useRef(video.currentFrame);
-  currentFrameRef.current = video.currentFrame;
+  const scrubTrackRef = useRef<HTMLDivElement>(null);
   const totalFramesRef = useRef(1);
+  const zoomRef = useRef(1);
+  const panRef = useRef({ x: 0, y: 0 });
 
-  const undoStack = useRef<TrajectoryPoint[][]>([]);
-  const redoStack = useRef<TrajectoryPoint[][]>([]);
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
 
-  const [activeTab, setActiveTab] = useState<Tab>('trajectory');
-  const [saveName, setSaveName] = useState('');
+  const segments = useMemo(
+    () => buildTrajectorySegments(video.trajectory),
+    [video.trajectory]
+  );
+
+  const visibleSegments = useMemo(() => {
+    if (showAllTrajectories) return segments;
+    const active =
+      activeSegmentAtFrame(segments, video.currentFrame) ??
+      segments.find((s) => s.id === focusedTrajectoryId) ??
+      null;
+    return active ? [active] : [];
+  }, [segments, showAllTrajectories, video.currentFrame, focusedTrajectoryId]);
 
   const totalFrames = Math.max(1, Math.round(duration * fps));
   totalFramesRef.current = totalFrames;
   const progressPercent = totalFrames > 1 ? (video.currentFrame / (totalFrames - 1)) * 100 : 0;
+  const activeScrubSegment = activeSegmentAtFrame(segments, video.currentFrame);
+
+  useEffect(() => {
+    zoomRef.current = 1;
+    panRef.current = { x: 0, y: 0 };
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  }, [video.id]);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    function applyZoom(oldZoom: number, newZoom: number, mx: number, my: number) {
+      const rect = el!.getBoundingClientRect();
+      const cx = rect.width / 2;
+      const cy = rect.height / 2;
+      const lx = mx - rect.left;
+      const ly = my - rect.top;
+      const p = panRef.current;
+      let nextPan = { x: 0, y: 0 };
+      if (newZoom > 1) {
+        nextPan = {
+          x: lx - cx - (lx - cx - p.x) * (newZoom / oldZoom),
+          y: ly - cy - (ly - cy - p.y) * (newZoom / oldZoom),
+        };
+      }
+      zoomRef.current = newZoom;
+      panRef.current = nextPan;
+      setZoom(newZoom);
+      setPan(nextPan);
+    }
+
+    function onWheel(e: WheelEvent) {
+      e.preventDefault();
+      const oldZoom = zoomRef.current;
+      const delta = e.deltaY;
+      if (delta === 0) return;
+      const factor = delta < 0 ? ZOOM_WHEEL_FACTOR : 1 / ZOOM_WHEEL_FACTOR;
+      const newZoom = clampZoom(oldZoom * factor);
+      if (newZoom === oldZoom) return;
+      applyZoom(oldZoom, newZoom, e.clientX, e.clientY);
+    }
+
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [video.id]);
+
+  useEffect(() => {
+    onTotalFramesChange(totalFrames);
+  }, [totalFrames, onTotalFramesChange]);
 
   useEffect(() => {
     const vid = videoRef.current;
@@ -75,29 +180,27 @@ export default function VideoDisplay({
     setDuration(vid.duration);
   }
 
-  function stepFrame(delta: number) {
-    onFrameChange(Math.min(totalFramesRef.current - 1, Math.max(0, currentFrameRef.current + delta)));
+  function scrubToClientX(clientX: number) {
+    const bar = scrubTrackRef.current;
+    if (!bar) return;
+    const rect = bar.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const frame = Math.round(ratio * (totalFramesRef.current - 1));
+    onFrameChange(Math.min(totalFramesRef.current - 1, Math.max(0, frame)));
   }
 
-  function pushUndo(current: TrajectoryPoint[]) {
-    undoStack.current = [...undoStack.current.slice(-MAX_HISTORY + 1), [...current]];
-    redoStack.current = [];
-  }
-
-  function handleUndo() {
-    if (undoStack.current.length === 0) return;
-    redoStack.current = [[...video.trajectory], ...redoStack.current.slice(0, MAX_HISTORY - 1)];
-    const prev = undoStack.current[undoStack.current.length - 1];
-    undoStack.current = undoStack.current.slice(0, -1);
-    onTrajectoryUpdate(prev);
-  }
-
-  function handleRedo() {
-    if (redoStack.current.length === 0) return;
-    undoStack.current = [...undoStack.current.slice(-MAX_HISTORY + 1), [...video.trajectory]];
-    const next = redoStack.current[0];
-    redoStack.current = redoStack.current.slice(1);
-    onTrajectoryUpdate(next);
+  function handleScrubMouseDown(e: React.MouseEvent<HTMLDivElement>) {
+    e.preventDefault();
+    scrubToClientX(e.clientX);
+    function onMove(ev: MouseEvent) {
+      scrubToClientX(ev.clientX);
+    }
+    function onUp() {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    }
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
   }
 
   function clientToCanvas(cx: number, cy: number): { x: number; y: number } {
@@ -146,7 +249,7 @@ export default function VideoDisplay({
     const pos = clientToCanvas(e.clientX, e.clientY);
     if (pickingExitPos) { onExitPosPicked(Math.round(pos.x), Math.round(pos.y)); return; }
     if (!plottingMode) return;
-    pushUndo(video.trajectory);
+    onPushUndo(video.trajectory);
     const newPt: TrajectoryPoint = { x: pos.x, y: pos.y, frame: video.currentFrame };
     const updated = [...video.trajectory.filter((p) => p.frame !== video.currentFrame), newPt]
       .sort((a, b) => a.frame - b.frame);
@@ -208,73 +311,15 @@ export default function VideoDisplay({
     function onKeyDown(e: KeyboardEvent) {
       const tag = (e.target as HTMLElement).tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-      if (e.key === 'ArrowRight') { e.preventDefault(); stepFrame(1); }
-      if (e.key === 'ArrowLeft') { e.preventDefault(); stepFrame(-1); }
-      if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) { e.preventDefault(); handleUndo(); }
-      if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); handleRedo(); }
+      if (e.key === 'ArrowRight') { e.preventDefault(); onStepFrame(1); }
+      if (e.key === 'ArrowLeft') { e.preventDefault(); onStepFrame(-1); }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) { e.preventDefault(); onUndo(); }
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); onRedo(); }
+      if (e.key === 'Delete') { e.preventDefault(); onDeleteCurrentPoint(); }
     }
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [video.trajectory]);
-
-  function startHold(dir: number) {
-    if (frameHoldRef.current) clearInterval(frameHoldRef.current);
-    frameHoldRef.current = setInterval(() => {
-      const next = Math.min(totalFramesRef.current - 1, Math.max(0, currentFrameRef.current + dir));
-      onFrameChange(next);
-    }, 60);
-  }
-
-  function stopHold() {
-    if (frameHoldRef.current) { clearInterval(frameHoldRef.current); frameHoldRef.current = null; }
-  }
-
-  useEffect(() => () => stopHold(), []);
-
-  function handleSaveTrajectory() {
-    if (video.trajectory.length === 0) return;
-    const baseName = saveName.trim() || video.name.replace(/\.[^.]+$/, '') + '_trajectory';
-    const fileName = baseName.endsWith('.txt') ? baseName : baseName + '.txt';
-    const lines = [
-      `# Trajectory for: ${video.name}`,
-      `# frame, x_px, y_px`,
-      ...video.trajectory.map((p) => `${p.frame},${p.x.toFixed(2)},${p.y.toFixed(2)}`),
-    ];
-    const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = fileName;
-    a.click();
-    URL.revokeObjectURL(url);
-  }
-
-  function handleLoadTrajectory(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    e.target.value = '';
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      const text = ev.target?.result as string;
-      const points: TrajectoryPoint[] = [];
-      for (const line of text.split('\n')) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith('#')) continue;
-        const parts = trimmed.split(',');
-        if (parts.length < 3) continue;
-        const frame = parseInt(parts[0]);
-        const x = parseFloat(parts[1]);
-        const y = parseFloat(parts[2]);
-        if (!isNaN(frame) && !isNaN(x) && !isNaN(y)) points.push({ frame, x, y });
-      }
-      if (points.length > 0) {
-        pushUndo(video.trajectory);
-        onTrajectoryUpdate(points.sort((a, b) => a.frame - b.frame));
-      }
-    };
-    reader.readAsText(file);
-  }
+  }, [onStepFrame, onUndo, onRedo, onDeleteCurrentPoint]);
 
   const drawRef = useRef<() => void>(() => {});
 
@@ -287,24 +332,26 @@ export default function VideoDisplay({
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    const sorted = [...video.trajectory].sort((a, b) => a.frame - b.frame);
-    if (sorted.length >= 2) {
-      ctx.beginPath();
-      sorted.forEach((pt, i) => { if (i === 0) ctx.moveTo(pt.x, pt.y); else ctx.lineTo(pt.x, pt.y); });
-      ctx.strokeStyle = 'rgba(239,68,68,0.65)';
-      ctx.lineWidth = 2;
-      ctx.stroke();
+    for (const seg of visibleSegments) {
+      const sorted = [...seg.points].sort((a, b) => a.frame - b.frame);
+      if (sorted.length >= 2) {
+        ctx.beginPath();
+        sorted.forEach((pt, i) => { if (i === 0) ctx.moveTo(pt.x, pt.y); else ctx.lineTo(pt.x, pt.y); });
+        ctx.strokeStyle = hexToRgba(seg.color, 0.75);
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+      sorted.forEach((pt) => {
+        const isActive = pt.frame === video.currentFrame;
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, isActive ? 9 : 5, 0, Math.PI * 2);
+        ctx.fillStyle = seg.color;
+        ctx.fill();
+        ctx.strokeStyle = 'white';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      });
     }
-    sorted.forEach((pt) => {
-      const isActive = pt.frame === video.currentFrame;
-      ctx.beginPath();
-      ctx.arc(pt.x, pt.y, isActive ? 9 : 5, 0, Math.PI * 2);
-      ctx.fillStyle = isActive ? '#f59e0b' : 'rgba(239,68,68,0.9)';
-      ctx.fill();
-      ctx.strokeStyle = 'white';
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-    });
 
     const { exitVelocity, exitAngle, dragCoefficient, magnusGain, exitX, exitY } = video.simulationParams;
     const ppm = video.meterstick.length;
@@ -353,13 +400,6 @@ export default function VideoDisplay({
     const s = video.meterstick;
     const rx = s.x + s.length;
     const isHovered = hoveredZone !== null || draggingZone !== null;
-    const pad = 8;
-    ctx.beginPath();
-    ctx.roundRect(s.x - pad, s.y - 20, s.length + pad * 2, 40, 6);
-    ctx.fillStyle = isHovered ? 'rgba(251,191,36,0.2)' : 'rgba(0,0,0,0.35)';
-    ctx.fill();
-    ctx.strokeStyle = isHovered ? 'rgba(251,191,36,0.7)' : 'rgba(251,191,36,0.3)';
-    ctx.lineWidth = 1; ctx.stroke();
     ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(rx, s.y);
     ctx.strokeStyle = isHovered ? '#fde68a' : '#fbbf24';
     ctx.lineWidth = isHovered ? 4 : 3; ctx.stroke();
@@ -378,7 +418,7 @@ export default function VideoDisplay({
     ctx.shadowColor = 'rgba(0,0,0,0.8)'; ctx.shadowBlur = 3;
     ctx.fillText('1 m', s.x + s.length / 2, s.y - 12);
     ctx.shadowBlur = 0;
-  }, [video, hoveredZone, draggingZone]);
+  }, [video, hoveredZone, draggingZone, visibleSegments]);
 
   useEffect(() => { drawRef.current = draw; draw(); }, [draw]);
 
@@ -389,201 +429,95 @@ export default function VideoDisplay({
     : hoveredZone ? 'col-resize'
     : 'default';
 
-  const canUndo = undoStack.current.length > 0;
-  const canRedo = redoStack.current.length > 0;
-
-  const tabs: { id: Tab; label: string }[] = [
-    { id: 'trajectory', label: 'Trajectory Editing' },
-    { id: 'save', label: 'Save / Load' },
-  ];
-
   return (
     <div className="flex flex-col flex-1 min-w-0 h-full outline-none">
-      {/* Video + canvas overlay */}
       <div ref={containerRef} className="relative flex-1 bg-black overflow-hidden">
-        <video
-          ref={videoRef}
-          src={video.url}
-          className="absolute inset-0 w-full h-full object-contain"
-          onLoadedMetadata={handleMetadata}
-          preload="auto"
-          playsInline
-          muted
-        />
-        <canvas
-          ref={canvasRef}
-          className="absolute"
-          style={{ cursor }}
-          onClick={handleCanvasClick}
-          onMouseMove={handleCanvasMouseMove}
-          onMouseLeave={handleCanvasMouseLeave}
-          onMouseDown={handleCanvasMouseDown}
-        />
+        <div
+          className="absolute inset-0 w-full h-full"
+          style={{
+            transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+            transformOrigin: 'center center',
+          }}
+        >
+          <video
+            ref={videoRef}
+            src={video.url}
+            className="absolute inset-0 w-full h-full object-contain"
+            onLoadedMetadata={handleMetadata}
+            preload="auto"
+            playsInline
+            muted
+          />
+          <canvas
+            ref={canvasRef}
+            className="absolute"
+            style={{ cursor }}
+            onClick={handleCanvasClick}
+            onMouseMove={handleCanvasMouseMove}
+            onMouseLeave={handleCanvasMouseLeave}
+            onMouseDown={handleCanvasMouseDown}
+          />
+        </div>
       </div>
 
-      {/* Bottom panel */}
-      <div className="bg-gray-900 border-t border-gray-700 flex-shrink-0">
-
-        {/* Scrub bar — always visible */}
-        <div className="px-4 pt-3 pb-2">
+      <div className="relative bg-gray-900 border-t border-gray-700 flex-shrink-0 px-4 py-3">
+        <div
+          className="relative px-2 py-2 cursor-pointer select-none"
+          onMouseDown={handleScrubMouseDown}
+        >
           <div
-            className="relative h-2 bg-gray-700 rounded-full cursor-pointer group"
-            onClick={(e) => {
-              const rect = e.currentTarget.getBoundingClientRect();
-              onFrameChange(Math.round(((e.clientX - rect.left) / rect.width) * (totalFrames - 1)));
-            }}
+            ref={scrubTrackRef}
+            className="relative h-2.5 bg-gray-700 rounded-full overflow-hidden"
           >
-            <div
-              className="absolute top-0 left-0 h-full bg-blue-500 rounded-full group-hover:bg-blue-400 transition-colors"
-              style={{ width: `${progressPercent}%` }}
-            />
-            <div
-              className="absolute top-1/2 -translate-y-1/2 w-3 h-3 bg-white rounded-full shadow -translate-x-1/2"
-              style={{ left: `${progressPercent}%` }}
-            />
+            {segments.map((seg) => {
+              const { left, width } = scrubSegmentStyle(seg.frameStart, seg.frameEnd, totalFrames);
+              const isActive = activeScrubSegment?.id === seg.id;
+              return (
+                <div
+                  key={seg.id}
+                  className="absolute top-0 h-full pointer-events-none transition-opacity"
+                  style={{
+                    left,
+                    width,
+                    backgroundColor: seg.color,
+                    opacity: isActive ? 1 : 0.85,
+                  }}
+                  title={`${seg.name} · frames ${seg.frameStart + 1}–${seg.frameEnd + 1}`}
+                />
+              );
+            })}
           </div>
+          <div
+            className="absolute top-1/2 -translate-y-1/2 w-3.5 h-3.5 bg-white rounded-full shadow-md border-2 border-gray-900 -translate-x-1/2 z-10 pointer-events-none"
+            style={{ left: `calc(0.5rem + (100% - 1rem) * ${progressPercent / 100})` }}
+          />
         </div>
-
-        {/* Tab bar */}
-        <div className="flex border-b border-gray-700 px-2">
-          {tabs.map((t) => (
-            <button
-              key={t.id}
-              onClick={() => setActiveTab(t.id)}
-              className={`px-4 py-2 text-xs font-medium transition-colors border-b-2 -mb-px ${
-                activeTab === t.id
-                  ? 'border-blue-500 text-blue-400'
-                  : 'border-transparent text-gray-500 hover:text-gray-300'
-              }`}
-            >
-              {t.label}
-            </button>
-          ))}
+        <div className="flex items-center justify-center gap-3 mt-2">
+          <button
+            onMouseDown={(e) => { e.preventDefault(); onStartFrameHold(-1); }}
+            onMouseUp={onStopFrameHold}
+            onMouseLeave={onStopFrameHold}
+            className="p-1.5 rounded-md bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white transition-colors select-none"
+            title="Previous frame (←)"
+          >
+            <ChevronLeft size={18} />
+          </button>
+          <span className="text-xs text-gray-400 font-mono tabular-nums min-w-[7rem] text-center">
+            Frame {video.currentFrame + 1} / {totalFrames}
+          </span>
+          <button
+            onMouseDown={(e) => { e.preventDefault(); onStartFrameHold(1); }}
+            onMouseUp={onStopFrameHold}
+            onMouseLeave={onStopFrameHold}
+            className="p-1.5 rounded-md bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white transition-colors select-none"
+            title="Next frame (→)"
+          >
+            <ChevronRight size={18} />
+          </button>
         </div>
-
-        {/* Tab content */}
-        <div className="overflow-x-auto">
-
-          {/* ── Trajectory Editing ── */}
-          {activeTab === 'trajectory' && (
-            <div className="flex flex-col gap-2 px-4 py-3 min-w-max">
-              <div className="flex items-center gap-3">
-                <button
-                  onMouseDown={(e) => { e.preventDefault(); startHold(-1); }}
-                  onMouseUp={stopHold} onMouseLeave={stopHold}
-                  className="p-1.5 rounded-md bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white transition-colors select-none"
-                  title="Previous frame (←)"
-                >
-                  <ChevronLeft size={18} />
-                </button>
-                <button
-                  onMouseDown={(e) => { e.preventDefault(); startHold(1); }}
-                  onMouseUp={stopHold} onMouseLeave={stopHold}
-                  className="p-1.5 rounded-md bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white transition-colors select-none"
-                  title="Next frame (→)"
-                >
-                  <ChevronRight size={18} />
-                </button>
-                <span className="text-xs text-gray-400 font-mono tabular-nums">
-                  Frame {video.currentFrame + 1} / {totalFrames}
-                </span>
-
-                <div className="w-px h-4 bg-gray-700" />
-
-                <button
-                  onClick={handleUndo} disabled={!canUndo} title="Undo (Ctrl+Z)"
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-md bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-                >
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>
-                  </svg>
-                  Undo
-                </button>
-                <button
-                  onClick={handleRedo} disabled={!canRedo} title="Redo (Ctrl+Y)"
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-md bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-                >
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="m15 14 5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/>
-                  </svg>
-                  Redo
-                </button>
-
-                <div className="w-px h-4 bg-gray-700" />
-
-                <button
-                  onClick={() => setPlottingMode((v) => !v)}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
-                    plottingMode
-                      ? 'bg-red-600 text-white hover:bg-red-500'
-                      : 'bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white'
-                  }`}
-                >
-                  <Crosshair size={13} />
-                  {plottingMode ? 'Stop Plotting' : 'Plot Ball'}
-                </button>
-                <button
-                  onClick={() => { pushUndo(video.trajectory); onTrajectoryUpdate([]); }}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white transition-colors"
-                >
-                  <RotateCcw size={13} />
-                  Clear
-                </button>
-              </div>
-
-              {plottingMode && !pickingExitPos && (
-                <p className="text-xs text-amber-400">
-                  Click on the ball to plot · ← → to step frames · Ctrl+Z / Ctrl+Y to undo/redo
-                </p>
-              )}
-              {pickingExitPos && (
-                <p className="text-xs text-green-400">
-                  Click anywhere on the video to set the simulation launch point.
-                </p>
-              )}
-            </div>
-          )}
-
-          {/* ── Save / Load ── */}
-          {activeTab === 'save' && (
-            <div className="flex items-center gap-3 px-4 py-3 min-w-max">
-              <label className="text-xs text-gray-400 whitespace-nowrap">File name</label>
-              <input
-                type="text"
-                value={saveName}
-                onChange={(e) => setSaveName(e.target.value)}
-                placeholder={`${video.name.replace(/\.[^.]+$/, '')}_trajectory`}
-                className="w-56 text-xs bg-gray-800 border border-gray-600 rounded-md px-2.5 py-1.5 text-white placeholder-gray-600 focus:outline-none focus:border-blue-500"
-              />
-              <span className="text-xs text-gray-600">.txt</span>
-
-              <div className="w-px h-4 bg-gray-700" />
-
-              <button
-                onClick={handleSaveTrajectory}
-                disabled={video.trajectory.length === 0}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-              >
-                <Save size={13} />
-                Save Trajectory
-              </button>
-
-              <input ref={loadInputRef} type="file" accept=".txt" className="hidden" onChange={handleLoadTrajectory} />
-              <button
-                onClick={() => loadInputRef.current?.click()}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white transition-colors"
-              >
-                <Upload size={13} />
-                Load Trajectory
-              </button>
-
-              {video.trajectory.length === 0 && (
-                <span className="text-xs text-gray-600">No points plotted yet</span>
-              )}
-            </div>
-          )}
-
-        </div>
+        <span className="absolute bottom-3 right-4 text-xs text-gray-500 font-mono tabular-nums pointer-events-none">
+          {Math.round(zoom * 100)}%
+        </span>
       </div>
     </div>
   );
