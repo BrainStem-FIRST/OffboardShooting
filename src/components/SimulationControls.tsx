@@ -1,23 +1,20 @@
 import { useRef, useState, useEffect } from 'react';
-import { Eye, EyeOff, Crosshair, Target, Zap, X } from 'lucide-react';
+import { Eye, EyeOff, Zap, X } from 'lucide-react';
 import { SimulationParams, TrajectoryPoint, Meterstick } from '../types';
 import { fitDragMagnusAsync } from '../simulation';
 import {
-  panelAside, panelContent, panelSectionTitle, panelLabel, panelBody, panelHint,
-  panelInput, panelInputNumeric, panelBtnPrimary, panelLabelInline,
+  panelAside, panelContent, panelSectionTitle, panelLabelInline, panelBody, panelHint,
+  panelInputNumeric, panelBtnPrimary,
 } from './panelStyles';
 
 interface Props {
   params: SimulationParams;
-  hasExitPos: boolean;
   showSimulation: boolean;
   trajectory: TrajectoryPoint[];
   meterstick: Meterstick;
   framerate: number;
   onChange: (p: SimulationParams) => void;
   onToggleShow: () => void;
-  pickingExitPos: boolean;
-  onStartPickExitPos: () => void;
   width: number;
 }
 
@@ -30,38 +27,6 @@ interface SliderRowProps {
   max: number;
   step: number;
   onChange: (v: number) => void;
-}
-
-function IntInput({ label, value, onChange }: { label: string; value: number; onChange: (v: number) => void }) {
-  const [raw, setRaw] = useState(String(value));
-  const [focused, setFocused] = useState(false);
-
-  useEffect(() => {
-    if (!focused) setRaw(String(value));
-  }, [value, focused]);
-
-  function commit(str: string) {
-    const n = parseInt(str.replace(/[^0-9\-]/g, ''), 10);
-    const result = isNaN(n) ? value : n;
-    setRaw(String(result));
-    onChange(result);
-  }
-
-  return (
-    <div className="flex-1">
-      <label className={panelLabel}>{label}</label>
-      <input
-        type="text"
-        inputMode="numeric"
-        value={raw}
-        onChange={(e) => setRaw(e.target.value)}
-        onFocus={() => setFocused(true)}
-        onBlur={(e) => { setFocused(false); commit(e.target.value); }}
-        onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
-        className={panelInput}
-      />
-    </div>
-  );
 }
 
 function SliderRow({ label, unit, value, min, max, step, onChange }: SliderRowProps) {
@@ -114,15 +79,12 @@ function SliderRow({ label, unit, value, min, max, step, onChange }: SliderRowPr
 
 export default function SimulationControls({
   params,
-  hasExitPos,
   showSimulation,
   trajectory,
   meterstick,
   framerate,
   onChange,
   onToggleShow,
-  pickingExitPos,
-  onStartPickExitPos,
   width,
 }: Props) {
   const [fitStatus, setFitStatus] = useState<'idle' | 'running' | 'ok' | 'fail'>('idle');
@@ -136,7 +98,6 @@ export default function SimulationControls({
 
   const canFit =
     trajectory.length >= 3 &&
-    hasExitPos &&
     meterstick.length > 0 &&
     framerate > 0 &&
     params.exitVelocity > 0;
@@ -151,8 +112,6 @@ export default function SimulationControls({
 
     const result = await fitDragMagnusAsync(
       trajectory,
-      params.exitX,
-      params.exitY,
       meterstick.length,
       framerate,
       params.exitVelocity,
@@ -285,8 +244,6 @@ export default function SimulationControls({
             <p className={`${panelHint} text-center`}>
               {trajectory.length < 3
                 ? `Need ${3 - trajectory.length} more plotted point${3 - trajectory.length === 1 ? '' : 's'}`
-                : !hasExitPos
-                ? 'Set a launch point first'
                 : meterstick.length <= 0
                 ? 'Calibrate the meterstick scale first'
                 : framerate <= 0
@@ -301,39 +258,9 @@ export default function SimulationControls({
           )}
           {fitStatus === 'fail' && (
             <p className="text-sm text-red-400 text-center">
-              Could not fit — check launch point and scale
+              Could not fit — check scale and velocity
             </p>
           )}
-        </div>
-      </div>
-
-      <div className="pt-4 border-t border-gray-700 space-y-3">
-        <div className="flex items-center justify-between">
-          <h3 className={panelSectionTitle}>
-            Launch Point
-          </h3>
-          <Target
-            size={16}
-            className={hasExitPos ? 'text-green-400' : 'text-gray-600'}
-          />
-        </div>
-        <p className={panelBody}>
-          Click &quot;Pick on Video&quot; then click the frame where the ball exits the robot.
-        </p>
-        <button
-          onClick={onStartPickExitPos}
-          className={`w-full ${panelBtnPrimary} ${
-            pickingExitPos
-              ? 'bg-green-600 text-white hover:bg-green-500'
-              : 'bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white'
-          }`}
-        >
-          <Crosshair size={14} />
-          {pickingExitPos ? 'Click on Video...' : 'Pick on Video'}
-        </button>
-        <div className="flex gap-2">
-          <IntInput label="X (px)" value={Math.round(params.exitX)} onChange={(n) => setParam('exitX', n)} />
-          <IntInput label="Y (px)" value={Math.round(params.exitY)} onChange={(n) => setParam('exitY', n)} />
         </div>
       </div>
 
@@ -345,7 +272,7 @@ export default function SimulationControls({
           dt = 5 ms timestep
         </p>
         <p className={panelBody}>
-          Drag the yellow meterstick on the video to calibrate the 1-meter scale.
+          Launch point is the first plotted point. Drag the yellow meterstick on the video to calibrate the 1-meter scale.
         </p>
       </div>
       </div>

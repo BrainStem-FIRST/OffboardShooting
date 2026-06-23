@@ -159,8 +159,6 @@ const SIM_DT = 0.005;
 // via vy). Runs async in rounds to stay responsive and cancellable.
 export function fitDragMagnusAsync(
   trajectory: { x: number; y: number; frame: number }[],
-  exitX: number,
-  exitY: number,
   ppm: number,
   framerate: number,
   exitVelocity: number,
@@ -176,11 +174,12 @@ export function fitDragMagnusAsync(
 
     // Preprocess: sort by frame, convert to launch-relative meters with time.
     const sorted = [...trajectory].sort((a, b) => a.frame - b.frame);
-    const frame0 = sorted[0].frame;
+    const launch = sorted[0];
+    const frame0 = launch.frame;
     const obs = sorted.map((p) => ({
       t: (p.frame - frame0) / framerate,
-      x: (p.x - exitX) / ppm,
-      y: (exitY - p.y) / ppm,
+      x: (p.x - launch.x) / ppm,
+      y: (launch.y - p.y) / ppm,
     }));
     if (obs[obs.length - 1].t <= 0) {
       resolve(null);

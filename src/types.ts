@@ -15,8 +15,6 @@ export interface SimulationParams {
   exitAngle: number; // degrees from horizontal
   dragCoefficient: number;
   magnusGain: number; // upward accel = magnusGain * speed (m/s²·s/m)
-  exitX: number; // pixel x from first trajectory point
-  exitY: number; // pixel y from first trajectory point
 }
 
 export interface VideoData {
@@ -28,7 +26,6 @@ export interface VideoData {
   simulationParams: SimulationParams;
   showSimulation: boolean;
   currentFrame: number;
-  hasExitPos: boolean;
   framerate: number; // video fps for empirical velocity calculations
 }
 

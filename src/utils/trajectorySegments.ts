@@ -34,6 +34,11 @@ export function splitIntoSegments(points: TrajectoryPoint[]): TrajectoryPoint[][
   return groups;
 }
 
+export function firstTrajectoryPoint(points: TrajectoryPoint[]): TrajectoryPoint | null {
+  if (points.length === 0) return null;
+  return [...points].sort((a, b) => a.frame - b.frame)[0];
+}
+
 export function buildTrajectorySegments(points: TrajectoryPoint[]): TrajectorySegment[] {
   return splitIntoSegments(points).map((pts, i) => ({
     id: `traj-${pts[0].frame}-${i}`,

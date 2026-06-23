@@ -29,10 +29,9 @@ function makeDefaultVideo(id: string, name: string, url: string): VideoData {
     url,
     trajectory: [],
     meterstick: { x: 80, y: 680, length: 160 },
-    simulationParams: { exitVelocity: 8, exitAngle: 45, dragCoefficient: 0.01, magnusGain: 0, exitX: 0, exitY: 0 },
+    simulationParams: { exitVelocity: 8, exitAngle: 45, dragCoefficient: 0.01, magnusGain: 0 },
     showSimulation: false,
     currentFrame: 0,
-    hasExitPos: false,
     framerate: 30,
   };
 }
@@ -81,7 +80,6 @@ export default function App() {
   // System ID state
   const [videos, setVideos] = useState<VideoData[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [pickingExitPos, setPickingExitPos] = useState(false);
 
   // Trajectory annotation UI state (sysid)
   const [plottingMode, setPlottingMode] = useState(false);
@@ -330,21 +328,6 @@ export default function App() {
     );
   }, [selectedId]);
 
-  const handleExitPosPicked = useCallback(
-    (x: number, y: number) => {
-      if (!selectedId) return;
-      setPickingExitPos(false);
-      setVideos((prev) =>
-        prev.map((v) =>
-          v.id === selectedId
-            ? { ...v, hasExitPos: true, simulationParams: { ...v.simulationParams, exitX: x, exitY: y } }
-            : v
-        )
-      );
-    },
-    [selectedId]
-  );
-
   function handleGenerate() {
     const drag = trajGenParams.dragCoefficient;
     const magnus = trajGenParams.magnusGain;
@@ -453,7 +436,7 @@ export default function App() {
                 videos={videos}
                 selectedVideo={selectedVideo}
                 selectedId={selectedId}
-                onSelect={(id) => { setSelectedId(id); setPickingExitPos(false); }}
+                onSelect={(id) => { setSelectedId(id); }}
                 onUpload={handleUpload}
                 onDelete={handleDelete}
                 width={leftWidth}
@@ -475,7 +458,6 @@ export default function App() {
                 onDeleteCurrentPoint={handleDeleteCurrentPoint}
                 onClearAllPoints={handleClearAllPoints}
                 canDeleteCurrentPoint={canDeleteCurrentPoint}
-                pickingExitPos={pickingExitPos}
                 onLoadTrajectory={handleLoadTrajectory}
               />
             </div>
@@ -509,8 +491,6 @@ export default function App() {
                   onMetastickUpdate={handleMetastickUpdate}
                   onFrameChange={handleFrameChange}
                   onTotalFramesChange={setTotalFrames}
-                  pickingExitPos={pickingExitPos}
-                  onExitPosPicked={handleExitPosPicked}
                   plottingMode={plottingMode}
                   showAllTrajectories={showAllTrajectories}
                   focusedTrajectoryId={focusedTrajectoryId}
@@ -574,15 +554,12 @@ export default function App() {
               {selectedVideo && (
                 <SimulationControls
                   params={selectedVideo.simulationParams}
-                  hasExitPos={selectedVideo.hasExitPos}
                   showSimulation={selectedVideo.showSimulation}
                   trajectory={activeTrajectoryPoints}
                   meterstick={selectedVideo.meterstick}
                   framerate={selectedVideo.framerate}
                   onChange={handleSimParamsChange}
                   onToggleShow={handleToggleSimulation}
-                  pickingExitPos={pickingExitPos}
-                  onStartPickExitPos={() => setPickingExitPos((v) => !v)}
                   width={rightWidth}
                 />
               )}

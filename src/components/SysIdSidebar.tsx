@@ -78,7 +78,6 @@ interface Props {
   onDeleteCurrentPoint: () => void;
   onClearAllPoints: () => void;
   canDeleteCurrentPoint: boolean;
-  pickingExitPos: boolean;
   onLoadTrajectory: (videoId: string, points: TrajectoryPoint[]) => void;
 }
 
@@ -108,7 +107,6 @@ export default function SysIdSidebar({
   onDeleteCurrentPoint,
   onClearAllPoints,
   canDeleteCurrentPoint,
-  pickingExitPos,
   onLoadTrajectory,
 }: Props) {
   const [activeTab, setActiveTab] = useState<SidebarTab>('upload');
@@ -300,14 +298,9 @@ export default function SysIdSidebar({
                   )}
                 </p>
 
-                {plottingMode && !pickingExitPos && (
+                {plottingMode && (
                   <p className={panelBody}>
                     Click on the ball to plot · ← → to step frames · Delete to remove current point · Ctrl+Z / Ctrl+Y to undo/redo
-                  </p>
-                )}
-                {pickingExitPos && (
-                  <p className={panelBody}>
-                    Click anywhere on the video to set the simulation launch point.
                   </p>
                 )}
 
