@@ -425,7 +425,7 @@ export default function SysIdSidebar({
             />
           </div>
 
-          <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-1.5">
+          <div className="flex-1 min-h-[8rem] overflow-y-auto p-3 space-y-1.5">
             {videos.length === 0 && (
               <p className={`${panelEmpty} mt-8 px-2`}>
                 No videos yet. Upload an iPhone video to get started.
@@ -469,12 +469,12 @@ export default function SysIdSidebar({
             })}
           </div>
 
-          <div className="flex-shrink-0 p-4 border-t border-gray-700 space-y-2">
+          <div className="flex-shrink-0 max-h-48 min-h-0 overflow-y-auto border-t border-gray-700 p-3 space-y-1.5">
             <button
               type="button"
               onClick={handleSaveProjectClick}
               disabled={videos.length === 0 || saving || importing}
-              className={`w-full ${panelBtnPrimary} bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed`}
+              className={`w-full ${panelBtnPrimary} bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed py-1.5 text-sm`}
             >
               <Save size={14} />
               {saving ? 'Saving…' : 'Save Configs'}
@@ -493,14 +493,14 @@ export default function SysIdSidebar({
               type="button"
               onClick={handleImportProjectClick}
               disabled={saving || importing}
-              className={`w-full ${panelBtnPrimary} bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed`}
+              className={`w-full ${panelBtnPrimary} bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed py-1.5 text-sm`}
             >
               <FolderDown size={14} />
               {importing ? 'Importing…' : 'Import Project'}
             </button>
             {projectStatus && (
               <p
-                className={`text-sm leading-snug ${
+                className={`text-xs leading-snug ${
                   projectStatus.ok === true
                     ? 'text-green-400'
                     : projectStatus.ok === false
@@ -511,19 +511,17 @@ export default function SysIdSidebar({
                 {projectStatus.text}
               </p>
             )}
-            <div className={`${panelMeta} text-xs leading-relaxed space-y-2 pt-1`}>
+            <div className={`${panelMeta} text-[11px] leading-snug space-y-1.5`}>
               <p>
                 <span className="text-gray-400">Save Configs</span> downloads{' '}
-                <span className={panelMono}>{'{name}_configuration.json'}</span> files to your browser downloads folder.
-                Move them into <span className={panelMono}>{PROJECT_SUBDIR}/</span> with your videos, then use Import Project.
+                <span className={panelMono}>{'{name}_configuration.json'}</span> files. Move into{' '}
+                <span className={panelMono}>{PROJECT_SUBDIR}/</span> with videos, then Import Project.
               </p>
-              <pre className={`${panelMono} text-gray-500 whitespace-pre-wrap`}>{`MyProject/  ← select this folder for import
+              <pre className={`${panelMono} text-gray-500 whitespace-pre-wrap text-[10px] leading-tight`}>{`MyProject/
   ${PROJECT_SUBDIR}/
     shot1.mp4
-    shot1_configuration.json
-    shot2.mov
-    shot2_configuration.json`}</pre>
-              <p>Each video pairs with <span className={panelMono}>{'{name}_configuration.json'}</span> (same basename). Videos without a config import with defaults.</p>
+    shot1_configuration.json`}</pre>
+              <p>Each video pairs with <span className={panelMono}>{'{name}_configuration.json'}</span>.</p>
             </div>
           </div>
         </>
