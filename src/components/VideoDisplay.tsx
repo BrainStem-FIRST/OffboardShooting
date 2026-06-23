@@ -409,12 +409,12 @@ export default function VideoDisplay({
     function onKeyDown(e: KeyboardEvent) {
       const tag = (e.target as HTMLElement).tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-      if (e.key === 'ArrowRight') { e.preventDefault(); onStepFrame(1); }
-      if (e.key === 'ArrowLeft') { e.preventDefault(); onStepFrame(-1); }
+      const key = e.key.toLowerCase();
+      if (e.key === 'ArrowRight' || key === 'e') { e.preventDefault(); onStepFrame(1); }
+      if (e.key === 'ArrowLeft' || key === 'q') { e.preventDefault(); onStepFrame(-1); }
       if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) { e.preventDefault(); onUndo(); }
       if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); onRedo(); }
       if (e.key === 'Delete') { e.preventDefault(); onDeleteCurrentPoint(); }
-      const key = e.key.toLowerCase();
       if (key === 'w' || key === 'a' || key === 's' || key === 'd') {
         const dxCm = key === 'a' ? -1 : key === 'd' ? 1 : 0;
         const dyCm = key === 'w' ? -1 : key === 's' ? 1 : 0;

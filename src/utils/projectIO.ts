@@ -44,6 +44,24 @@ export function resolveProjectFiles(files: File[]): File[] {
   return files;
 }
 
+export function scanImportFileNames(fileNames: string[]): ImportScanDiagnostics {
+  const videos = fileNames.filter(isVideoFileName);
+  const configs = fileNames.filter((n) => n.endsWith('_configuration.json'));
+  const unrecognized = fileNames.filter(
+    (n) => !isVideoFileName(n) && !n.endsWith('_configuration.json')
+  );
+
+  return {
+    totalFiles: fileNames.length,
+    resolvedCount: fileNames.length,
+    usedVideosAndConfigsSubfolder: false,
+    paths: fileNames,
+    videos,
+    configs,
+    unrecognized,
+  };
+}
+
 export function scanImportFiles(files: File[]): ImportScanDiagnostics {
   const paths = files.map(fileRelativePath);
   const videos = files.filter((f) => isVideoFileName(f.name)).map((f) => f.name);
@@ -123,6 +141,45 @@ export async function saveConfigsToDirectory(
       const payload = videoToConfigurationSaveFile(video);
       const jsonBlob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
       await writeBlobToFile(dir, configFileName, jsonBlob);
+    } catch (err) {
+      return {
+        ok: false,
+        cancelled: false,
+        message: `Failed to save config for "${video.name}": ${(err as Error).message}`,
+      };
+    }
+  }
+
+  return { ok: true, count: videos.length };
+}
+
+/** Write config JSON files into the selected project folder (flat layout, overwrites existing). */
+export async function saveConfigsToDirectoryFlat(
+  parentHandle: FileSystemDirectoryHandle,
+  videos: VideoData[],
+  onProgress?: (current: number, total: number) => void
+): Promise<SaveProjectResult> {
+  if (!(await ensureDirWritePermission(parentHandle))) {
+    return { ok: false, cancelled: false, message: 'Write permission was denied for the selected folder.' };
+  }
+
+  const usedConfigNames = new Set<string>();
+
+  for (let i = 0; i < videos.length; i++) {
+    const video = videos[i];
+    onProgress?.(i + 1, videos.length);
+
+    let configFileName = configFileNameForVideo(video.name);
+    while (usedConfigNames.has(configFileName)) {
+      const stem = configFileName.replace(/_configuration\.json$/, '');
+      configFileName = `${stem} (${usedConfigNames.size})_configuration.json`;
+    }
+    usedConfigNames.add(configFileName);
+
+    try {
+      const payload = videoToConfigurationSaveFile(video);
+      const jsonBlob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      await writeBlobToFile(parentHandle, configFileName, jsonBlob);
     } catch (err) {
       return {
         ok: false,
@@ -317,6 +374,10 @@ async function listFileNames(dir: FileSystemDirectoryHandle): Promise<string[]> 
     if (handle.kind === 'file') names.push(name);
   }
   return names;
+}
+
+export async function listProjectFileNames(dir: FileSystemDirectoryHandle): Promise<string[]> {
+  return listFileNames(dir);
 }
 
 export async function pickProjectForImport(): Promise<ImportProjectResult> {

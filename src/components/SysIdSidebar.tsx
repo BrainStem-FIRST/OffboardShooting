@@ -11,11 +11,14 @@ import {
   countPlottedPoints,
 } from '../utils/trajectorySegments';
 import {
-  PROJECT_SUBDIR,
   configFileNameForVideo,
   downloadConfigFiles,
-  previewProjectFiles,
-  loadProjectEntriesFromFiles,
+  saveConfigsToDirectoryFlat,
+  buildImportPreview,
+  formatImportFailureMessage,
+  scanImportFileNames,
+  listProjectFileNames,
+  loadProjectFromDir,
 } from '../utils/projectIO';
 import type { ImportedProjectEntry } from '../utils/projectIO';
 import {
@@ -186,12 +189,12 @@ export default function SysIdSidebar({
 }: Props) {
   const [activeTab, setActiveTab] = useState<SidebarTab>('uploadSave');
   const uploadInputRef = useRef<HTMLInputElement>(null);
-  const importFolderInputRef = useRef<HTMLInputElement>(null);
   const saveBusyRef = useRef(false);
+  const saveProjectBusyRef = useRef(false);
   const importBusyRef = useRef(false);
-  const importPickerOpenedRef = useRef(false);
-  const ignoreNextEmptyImportRef = useRef(false);
+  const projectDirHandleRef = useRef<FileSystemDirectoryHandle | null>(null);
   const [saving, setSaving] = useState(false);
+  const [savingProject, setSavingProject] = useState(false);
   const [importing, setImporting] = useState(false);
   const [projectStatus, setProjectStatus] = useState<{ ok: boolean | null; text: string } | null>(null);
 
@@ -268,8 +271,8 @@ export default function SysIdSidebar({
     }
   }
 
-  function handleSaveProjectClick() {
-    if (saveBusyRef.current || importBusyRef.current) return;
+  function handleSaveConfigsClick() {
+    if (saveBusyRef.current || saveProjectBusyRef.current || importBusyRef.current) return;
     if (videos.length === 0) return;
 
     saveBusyRef.current = true;
@@ -279,7 +282,7 @@ export default function SysIdSidebar({
       const { count } = downloadConfigFiles(videos);
       setProjectStatus({
         ok: true,
-        text: `Downloaded ${count} config file(s). Move them into ${PROJECT_SUBDIR}/ with your videos.`,
+        text: `Downloaded ${count} config file(s). Place them in your project folder next to the videos.`,
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -290,89 +293,136 @@ export default function SysIdSidebar({
     }
   }
 
-  function handleImportProjectClick() {
-    if (importBusyRef.current || saveBusyRef.current) {
-      setProjectStatus({ ok: null, text: 'Import already in progress.' });
+  function handleSaveProjectClick() {
+    if (saveProjectBusyRef.current || saveBusyRef.current || importBusyRef.current) return;
+    if (videos.length === 0) return;
+
+    if (!projectDirHandleRef.current) {
+      setProjectStatus({
+        ok: false,
+        text: 'Import a project folder first — Save Project writes to the folder you imported from.',
+      });
       return;
     }
-    importPickerOpenedRef.current = true;
-    importFolderInputRef.current?.click();
+
+    saveProjectBusyRef.current = true;
+    setSavingProject(true);
+    setProjectStatus(null);
+
+    void (async () => {
+      try {
+        const handle = projectDirHandleRef.current!;
+        let perm = await handle.queryPermission({ mode: 'readwrite' });
+        if (perm !== 'granted') {
+          perm = await handle.requestPermission({ mode: 'readwrite' });
+        }
+        if (perm !== 'granted') {
+          setProjectStatus({ ok: false, text: 'Write permission denied for the imported project folder.' });
+          return;
+        }
+
+        const result = await saveConfigsToDirectoryFlat(handle, videos, (current, total) => {
+          setProjectStatus({ ok: null, text: `Saving project ${current}/${total}…` });
+        });
+        if (!result.ok) {
+          if (!result.cancelled) setProjectStatus({ ok: false, text: result.message });
+          return;
+        }
+        setProjectStatus({
+          ok: true,
+          text: `Saved ${result.count} config(s) to imported project folder (replaced existing).`,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setProjectStatus({ ok: false, text: `Could not save project: ${msg}` });
+      } finally {
+        saveProjectBusyRef.current = false;
+        setSavingProject(false);
+      }
+    })();
   }
 
-  async function handleImportFolderSelected(e: React.ChangeEvent<HTMLInputElement>) {
-    const input = e.target;
-    const fileList = input.files;
-
-    if (!fileList || fileList.length === 0) {
-      if (ignoreNextEmptyImportRef.current) {
-        ignoreNextEmptyImportRef.current = false;
-        return;
-      }
-      if (importPickerOpenedRef.current) {
-        importPickerOpenedRef.current = false;
-        setProjectStatus({ ok: null, text: 'Import cancelled — no folder selected.' });
-      }
-      return;
-    }
-
-    if (importBusyRef.current || saveBusyRef.current) {
+  function handleImportProjectClick() {
+    if (importBusyRef.current || saveBusyRef.current || saveProjectBusyRef.current) {
       setProjectStatus({ ok: null, text: 'Import already in progress.' });
       return;
     }
 
-    importPickerOpenedRef.current = false;
-    const allFiles = Array.from(fileList);
+    if (typeof window.showDirectoryPicker !== 'function') {
+      setProjectStatus({
+        ok: false,
+        text: 'Import Project requires Chrome or Edge. Your browser does not support folder selection.',
+      });
+      return;
+    }
 
     importBusyRef.current = true;
     setImporting(true);
-    setProjectStatus({ ok: null, text: `Scanning ${allFiles.length} file(s)…` });
-    try {
-      const previewResult = previewProjectFiles(allFiles);
-      if (!previewResult.ok) {
-        setProjectStatus({ ok: false, text: previewResult.message });
-        return;
-      }
+    setProjectStatus(null);
 
-      const { preview, files } = previewResult;
+    window.setTimeout(() => {
+      void (async () => {
+        try {
+          const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
+          projectDirHandleRef.current = handle;
 
-      let confirmMsg = `Import ${preview.pairs.length} video(s) and replace the current session?\n\n`;
-      for (const pair of preview.pairs) {
-        confirmMsg += `• ${pair.videoName}`;
-        confirmMsg += pair.configName ? ` + ${pair.configName}` : ' (no config)';
-        confirmMsg += '\n';
-      }
-      if (preview.orphanConfigs.length > 0) {
-        confirmMsg += `\nWarning: unmatched config file${preview.orphanConfigs.length !== 1 ? 's' : ''}: ${preview.orphanConfigs.join(', ')}\n`;
-      }
+          setProjectStatus({ ok: null, text: 'Scanning folder…' });
+          const fileNames = await listProjectFileNames(handle);
+          const preview = buildImportPreview(fileNames);
+          if (preview.pairs.length === 0) {
+            projectDirHandleRef.current = null;
+            setProjectStatus({
+              ok: false,
+              text: formatImportFailureMessage(scanImportFileNames(fileNames)),
+            });
+            return;
+          }
 
-      if (!window.confirm(confirmMsg)) {
-        setProjectStatus({ ok: null, text: 'Import cancelled.' });
-        return;
-      }
+          let confirmMsg = `Import ${preview.pairs.length} video(s) and replace the current session?\n\n`;
+          for (const pair of preview.pairs) {
+            confirmMsg += `• ${pair.videoName}`;
+            confirmMsg += pair.configName ? ` + ${pair.configName}` : ' (no config)';
+            confirmMsg += '\n';
+          }
+          if (preview.orphanConfigs.length > 0) {
+            confirmMsg += `\nWarning: unmatched config file${preview.orphanConfigs.length !== 1 ? 's' : ''}: ${preview.orphanConfigs.join(', ')}\n`;
+          }
+          confirmMsg += '\nSave Project will update configs in this folder.';
 
-      setProjectStatus({ ok: null, text: 'Loading project files…' });
-      const loadResult = await loadProjectEntriesFromFiles(files, preview);
-      if (!loadResult.ok) {
-        setProjectStatus({ ok: false, text: loadResult.message });
-        return;
-      }
+          if (!window.confirm(confirmMsg)) {
+            projectDirHandleRef.current = null;
+            setProjectStatus({ ok: null, text: 'Import cancelled.' });
+            return;
+          }
 
-      onImportProject(loadResult.entries);
-      let text = `Imported ${loadResult.entries.length} video(s).`;
-      if (loadResult.warnings.length > 0) {
-        text += ` ${loadResult.warnings.join(' ')}`;
-      }
-      setProjectStatus({ ok: true, text });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error('[ProjectImport] Unexpected error:', err);
-      setProjectStatus({ ok: false, text: `Import failed: ${msg}` });
-    } finally {
-      importBusyRef.current = false;
-      setImporting(false);
-      ignoreNextEmptyImportRef.current = true;
-      input.value = '';
-    }
+          setProjectStatus({ ok: null, text: 'Loading project files…' });
+          const loadResult = await loadProjectFromDir(handle);
+          if (!loadResult.ok) {
+            projectDirHandleRef.current = null;
+            setProjectStatus({ ok: false, text: loadResult.message });
+            return;
+          }
+
+          onImportProject(loadResult.entries);
+          let text = `Imported ${loadResult.entries.length} video(s). Save Project will update this folder.`;
+          if (loadResult.warnings.length > 0) {
+            text += ` ${loadResult.warnings.join(' ')}`;
+          }
+          setProjectStatus({ ok: true, text });
+        } catch (err) {
+          projectDirHandleRef.current = null;
+          if ((err as DOMException).name === 'AbortError') {
+            setProjectStatus({ ok: null, text: 'Import cancelled.' });
+            return;
+          }
+          const msg = err instanceof Error ? err.message : String(err);
+          setProjectStatus({ ok: false, text: `Import failed: ${msg}` });
+        } finally {
+          importBusyRef.current = false;
+          setImporting(false);
+        }
+      })();
+    }, 150);
   }
 
   function videoRowStats(v: VideoData) {
@@ -472,27 +522,26 @@ export default function SysIdSidebar({
           <div className="flex-shrink-0 max-h-48 min-h-0 overflow-y-auto border-t border-gray-700 p-3 space-y-1.5">
             <button
               type="button"
-              onClick={handleSaveProjectClick}
-              disabled={videos.length === 0 || saving || importing}
+              onClick={handleSaveConfigsClick}
+              disabled={videos.length === 0 || saving || savingProject || importing}
               className={`w-full ${panelBtnPrimary} bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed py-1.5 text-sm`}
             >
               <Save size={14} />
               {saving ? 'Saving…' : 'Save Configs'}
             </button>
-            <input
-              ref={importFolderInputRef}
-              type="file"
-              // @ts-expect-error webkitdirectory is supported in Chromium; same picker path as Upload Video
-              webkitdirectory=""
-              directory=""
-              multiple
-              className="hidden"
-              onChange={handleImportFolderSelected}
-            />
+            <button
+              type="button"
+              onClick={handleSaveProjectClick}
+              disabled={videos.length === 0 || saving || savingProject || importing}
+              className={`w-full ${panelBtnPrimary} bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed py-1.5 text-sm`}
+            >
+              <Save size={14} />
+              {savingProject ? 'Saving…' : 'Save Project'}
+            </button>
             <button
               type="button"
               onClick={handleImportProjectClick}
-              disabled={saving || importing}
+              disabled={saving || savingProject || importing}
               className={`w-full ${panelBtnPrimary} bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed py-1.5 text-sm`}
             >
               <FolderDown size={14} />
@@ -500,7 +549,7 @@ export default function SysIdSidebar({
             </button>
             <div className={`${panelMeta} text-[11px] leading-snug space-y-1.5`}>
               <p>
-                Select a project folder containing video and config files together.
+                Import Project selects your project folder. Save Project then overwrites configs in that same folder.
               </p>
               <pre className={`${panelMono} text-gray-500 whitespace-pre-wrap text-[10px] leading-tight`}>{`MyProject/
   shot1.mp4
