@@ -498,6 +498,17 @@ export default function SysIdSidebar({
               <FolderDown size={14} />
               {importing ? 'Importing…' : 'Import Project'}
             </button>
+            <div className={`${panelMeta} text-[11px] leading-snug space-y-1.5`}>
+              <p>
+                Select a project folder containing video and config files together.
+              </p>
+              <pre className={`${panelMono} text-gray-500 whitespace-pre-wrap text-[10px] leading-tight`}>{`MyProject/
+  shot1.mp4
+  shot1_configuration.json
+  shot2.mov
+  shot2_configuration.json`}</pre>
+              <p>Each video pairs with <span className={panelMono}>{'{name}_configuration.json'}</span>.</p>
+            </div>
             {projectStatus && (
               <p
                 className={`text-xs leading-snug ${
@@ -511,18 +522,6 @@ export default function SysIdSidebar({
                 {projectStatus.text}
               </p>
             )}
-            <div className={`${panelMeta} text-[11px] leading-snug space-y-1.5`}>
-              <p>
-                <span className="text-gray-400">Save Configs</span> downloads{' '}
-                <span className={panelMono}>{'{name}_configuration.json'}</span> files. Move into{' '}
-                <span className={panelMono}>{PROJECT_SUBDIR}/</span> with videos, then Import Project.
-              </p>
-              <pre className={`${panelMono} text-gray-500 whitespace-pre-wrap text-[10px] leading-tight`}>{`MyProject/
-  ${PROJECT_SUBDIR}/
-    shot1.mp4
-    shot1_configuration.json`}</pre>
-              <p>Each video pairs with <span className={panelMono}>{'{name}_configuration.json'}</span>.</p>
-            </div>
           </div>
         </>
       )}

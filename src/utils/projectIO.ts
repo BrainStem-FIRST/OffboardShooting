@@ -39,40 +39,23 @@ export interface ImportScanDiagnostics {
   unrecognized: string[];
 }
 
-function filesInProjectSubdir(files: File[]): File[] {
-  const subdirLower = `${PROJECT_SUBDIR}/`.toLowerCase();
-  return files.filter((f) => fileRelativePath(f).toLowerCase().includes(subdirLower));
-}
-
-/** Prefer files under `{PROJECT_SUBDIR}/` when that subfolder contains videos; otherwise use all files. */
+/** Import uses all files in the selected folder (flat project layout). */
 export function resolveProjectFiles(files: File[]): File[] {
-  if (files.length === 0) return [];
-  const inSubdir = filesInProjectSubdir(files);
-  if (inSubdir.length > 0 && inSubdir.some((f) => isVideoFileName(f.name))) {
-    return inSubdir;
-  }
   return files;
 }
 
 export function scanImportFiles(files: File[]): ImportScanDiagnostics {
   const paths = files.map(fileRelativePath);
-  const resolved = resolveProjectFiles(files);
-  const inSubdir = filesInProjectSubdir(files);
-  const usedVideosAndConfigsSubfolder =
-    inSubdir.length > 0 &&
-    inSubdir.some((f) => isVideoFileName(f.name)) &&
-    resolved.length === inSubdir.length;
-
-  const videos = resolved.filter((f) => isVideoFileName(f.name)).map((f) => f.name);
-  const configs = resolved.filter((f) => f.name.endsWith('_configuration.json')).map((f) => f.name);
-  const unrecognized = resolved
+  const videos = files.filter((f) => isVideoFileName(f.name)).map((f) => f.name);
+  const configs = files.filter((f) => f.name.endsWith('_configuration.json')).map((f) => f.name);
+  const unrecognized = files
     .filter((f) => !isVideoFileName(f.name) && !f.name.endsWith('_configuration.json'))
     .map((f) => f.name);
 
   return {
     totalFiles: files.length,
-    resolvedCount: resolved.length,
-    usedVideosAndConfigsSubfolder,
+    resolvedCount: files.length,
+    usedVideosAndConfigsSubfolder: false,
     paths,
     videos,
     configs,
@@ -82,23 +65,15 @@ export function scanImportFiles(files: File[]): ImportScanDiagnostics {
 
 export function formatImportFailureMessage(scan: ImportScanDiagnostics): string {
   const lines = ['No video files found to import.'];
-  lines.push(`Scanned ${scan.totalFiles} file(s) from the selected folder.`);
-
-  if (scan.usedVideosAndConfigsSubfolder) {
-    lines.push(`Used ${scan.resolvedCount} file(s) from ${PROJECT_SUBDIR}/.`);
-  } else if (scan.paths.some((p) => p.toLowerCase().includes(`${PROJECT_SUBDIR}/`.toLowerCase()))) {
-    lines.push(
-      `Found ${PROJECT_SUBDIR}/ but no videos inside it — also checked the parent folder (${scan.resolvedCount} file(s)).`
-    );
-  }
+  lines.push(`Scanned ${scan.totalFiles} file(s) in the selected folder.`);
 
   if (scan.configs.length > 0 && scan.videos.length === 0) {
     lines.push(
       `Found ${scan.configs.length} config file(s) (${scan.configs.slice(0, 3).join(', ')}${scan.configs.length > 3 ? '…' : ''}) but no video files.`
     );
-    lines.push('Add .mp4/.mov videos next to the configs (same folder or videosAndConfigs/).');
+    lines.push('Add .mp4/.mov videos to the same folder as the configs.');
   } else if (scan.videos.length === 0) {
-    lines.push('Expected pairs like shot1.mp4 + shot1_configuration.json.');
+    lines.push('Expected pairs like shot1.mp4 + shot1_configuration.json in one folder.');
   }
 
   if (scan.unrecognized.length > 0) {
@@ -374,7 +349,7 @@ export async function pickProjectForImport(): Promise<ImportProjectResult> {
     return {
       ok: false,
       cancelled: false,
-      message: `No video files found in ${PROJECT_SUBDIR}.`,
+      message: 'No video files found in the selected folder.',
     };
   }
 
