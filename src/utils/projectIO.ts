@@ -9,6 +9,14 @@ export function videoStem(name: string): string {
   return name.replace(/\.[^.]+$/, '');
 }
 
+/** Leading `{n}tps` in the filename stem, e.g. `600tps …` → 600 m/s exit velocity. */
+export function exitVelocityFromVideoName(name: string): number | null {
+  const match = videoStem(name).match(/^(\d+(?:\.\d+)?)tps/i);
+  if (!match) return null;
+  const n = parseFloat(match[1]);
+  return Number.isFinite(n) ? n : null;
+}
+
 export function configFileNameForVideo(videoName: string): string {
   return `${videoStem(videoName)}_configuration.json`;
 }

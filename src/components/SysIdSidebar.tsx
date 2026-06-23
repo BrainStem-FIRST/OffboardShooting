@@ -12,6 +12,7 @@ import {
 } from '../utils/trajectorySegments';
 import {
   configFileNameForVideo,
+  exitVelocityFromVideoName,
   downloadConfigFiles,
   saveConfigsToDirectoryFlat,
   buildImportPreview,
@@ -432,6 +433,18 @@ export default function SysIdSidebar({
     return { trajCount, pointCount };
   }
 
+  const videosSortedByExitVelocity = useMemo(() => {
+    return [...videos].sort((a, b) => {
+      const va = exitVelocityFromVideoName(a.name);
+      const vb = exitVelocityFromVideoName(b.name);
+      if (va === null && vb === null) return a.name.localeCompare(b.name);
+      if (va === null) return 1;
+      if (vb === null) return -1;
+      if (va !== vb) return va - vb;
+      return a.name.localeCompare(b.name);
+    });
+  }, [videos]);
+
   const tabs: { id: SidebarTab; label: string }[] = [
     { id: 'uploadSave', label: 'Upload/Save' },
     { id: 'annotation', label: 'Trajectory Annotation' },
@@ -481,7 +494,7 @@ export default function SysIdSidebar({
                 No videos yet. Upload an iPhone video to get started.
               </p>
             )}
-            {videos.map((v) => {
+            {videosSortedByExitVelocity.map((v) => {
               const { trajCount, pointCount } = videoRowStats(v);
               const configName = configFileNameForVideo(v.name);
               return (

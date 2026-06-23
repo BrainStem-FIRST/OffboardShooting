@@ -148,6 +148,9 @@ export default function VideoDisplay({
   totalFramesRef.current = totalFrames;
   const progressPercent = totalFrames > 1 ? (video.currentFrame / (totalFrames - 1)) * 100 : 0;
   const activeScrubSegment = activeSegmentAtFrame(segments, video.currentFrame);
+  const isCurrentFrameSkipped = video.trajectory.some(
+    (p) => p.frame === video.currentFrame && p.skipped
+  );
 
   useEffect(() => {
     zoomRef.current = 1;
@@ -695,12 +698,14 @@ export default function VideoDisplay({
           >
             <ChevronLeft size={18} />
           </button>
-          <span className="text-xs text-gray-400 font-mono tabular-nums min-w-[7rem] text-center">
-            Frame {video.currentFrame + 1} / {totalFrames}
-            {video.trajectory.some((p) => p.frame === video.currentFrame && p.skipped) && (
-              <span className="text-gray-500 ml-1">· skipped</span>
-            )}
-          </span>
+          <div className="flex flex-col items-center min-w-[7rem] text-center">
+            <span className="text-xs text-gray-400 font-mono tabular-nums leading-none">
+              Frame {video.currentFrame + 1} / {totalFrames}
+            </span>
+            <span className="text-[10px] text-gray-500 leading-none h-3 flex items-center justify-center">
+              {isCurrentFrameSkipped ? 'skipped' : null}
+            </span>
+          </div>
           <button
             onMouseDown={(e) => { e.preventDefault(); onStartFrameHold(1); }}
             onMouseUp={onStopFrameHold}
