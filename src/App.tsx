@@ -1,9 +1,10 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { ChevronLeft, ChevronRight, Upload, FolderDown } from 'lucide-react';
-import { VideoData, TrajectoryPoint, LaunchParams, GeneratedTrajectory, TrajGenParams, TrajGroup, MeterstickPoint, MeterstickClipboard } from './types';
+import { VideoData, TrajectoryPoint, LaunchParams, GeneratedTrajectory, TrajGenParams, TrajGroup, MeterstickPoint, MeterstickClipboard, XDir } from './types';
 import SysIdSidebar from './components/SysIdSidebar';
 import VideoDisplay from './components/VideoDisplay';
 import SimulationControls from './components/SimulationControls';
+import XdirUploadDialog from './components/XdirUploadDialog';
 import TrajectoryGenCenter from './components/TrajectoryGenCenter';
 import TrajectoryGenLeft from './components/TrajectoryGenLeft';
 import TrajectoryGenRight from './components/TrajectoryGenRight';
@@ -42,6 +43,7 @@ function makeDefaultVideo(id: string, name: string, url: string): VideoData {
     currentFrame: 0,
     framerate: 30,
     empiricalNumPoints: 2,
+    xdir: 1,
   };
 }
 
@@ -86,6 +88,7 @@ function ResizeHandle({ onMouseDown }: { onMouseDown: (e: React.MouseEvent) => v
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('trajgen');
+  const [pendingUploadFiles, setPendingUploadFiles] = useState<File[] | null>(null);
 
   // System ID state
   const [videos, setVideos] = useState<VideoData[]>([]);
@@ -248,6 +251,7 @@ export default function App() {
           launchParams: getLaunchParams(video.trajectoryLaunchParams, seg.id),
           pixelsPerMeter: ppm,
           framerate: fps,
+          xdir: video.xdir ?? 1,
         }));
       }),
     [videos]
@@ -273,15 +277,24 @@ export default function App() {
     setVideos((prev) => prev.map((v) => (v.id === id ? { ...v, ...patch } : v)));
   }
 
-  function handleUpload(files: FileList) {
-    const newVideos: VideoData[] = [];
-    Array.from(files).forEach((file) => {
+  function requestUpload(files: FileList) {
+    setPendingUploadFiles(Array.from(files));
+  }
+
+  function cancelPendingUpload() {
+    setPendingUploadFiles(null);
+  }
+
+  function confirmUpload(xdir: XDir) {
+    if (!pendingUploadFiles?.length) return;
+    const newVideos: VideoData[] = pendingUploadFiles.map((file) => {
       const url = URL.createObjectURL(file);
       const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      newVideos.push(makeDefaultVideo(id, file.name, url));
+      return { ...makeDefaultVideo(id, file.name, url), xdir };
     });
     setVideos((prev) => [...prev, ...newVideos]);
     if (!selectedId && newVideos.length > 0) setSelectedId(newVideos[0].id);
+    setPendingUploadFiles(null);
   }
 
   function handleDelete(id: string) {
@@ -377,6 +390,7 @@ export default function App() {
         if (entry.config.trajectoryLaunchParams) {
           video.trajectoryLaunchParams = entry.config.trajectoryLaunchParams;
         }
+        video.xdir = entry.config.xdir === -1 ? -1 : 1;
       }
       const firstPt = firstTrajectoryPoint(video.trajectory);
       if (firstPt) {
@@ -681,7 +695,7 @@ export default function App() {
                 selectedVideo={selectedVideo}
                 selectedId={selectedId}
                 onSelect={(id) => { setSelectedId(id); }}
-                onUpload={handleUpload}
+                onUpload={requestUpload}
                 onDelete={handleDelete}
                 width={leftWidth}
                 plottingMode={plottingMode}
@@ -774,7 +788,7 @@ export default function App() {
                     accept="video/*,.mov,.mp4,.m4v,.avi,.3gp"
                     multiple
                     className="hidden"
-                    onChange={(e) => { if (e.target.files?.length) { handleUpload(e.target.files); e.target.value = ''; } }}
+                    onChange={(e) => { if (e.target.files?.length) { requestUpload(e.target.files); e.target.value = ''; } }}
                   />
                   <div className="flex flex-col items-center gap-3">
                     <button
@@ -840,7 +854,9 @@ export default function App() {
                     launchParams: getLaunchParams(selectedVideo.trajectoryLaunchParams, seg.id),
                     pixelsPerMeter: scaleToPpmFn(MeterstickScale.fromVideo(selectedVideo)),
                     framerate: selectedVideo.framerate,
+                    xdir: selectedVideo.xdir ?? 1,
                   }))}
+                  xdir={selectedVideo.xdir ?? 1}
                   allVideosTrajectories={allVideosTrajectories}
                   meterstickScale={selectedMeterstickScale ?? MeterstickScale.fromVideo(selectedVideo)}
                   framerate={selectedVideo.framerate}
@@ -972,6 +988,14 @@ export default function App() {
           </>
         )}
       </div>
+
+      {pendingUploadFiles && tab === 'sysid' && (
+        <XdirUploadDialog
+          fileCount={pendingUploadFiles.length}
+          onSubmit={confirmUpload}
+          onCancel={cancelPendingUpload}
+        />
+      )}
     </div>
   );
 }

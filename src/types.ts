@@ -21,6 +21,9 @@ export interface MeterstickPoint {
 
 export type MeterstickClipboard = { points: MeterstickPoint[]; segmentMeters: number[] };
 
+/** Horizontal launch direction for sysid: 1 = rightward, -1 = leftward. */
+export type XDir = 1 | -1;
+
 export interface LaunchParams {
   exitVelocity: number; // m/s
   exitAngle: number; // degrees from horizontal
@@ -45,6 +48,8 @@ export interface VideoData {
   currentFrame: number;
   framerate: number; // video fps for empirical velocity calculations
   empiricalNumPoints: number; // plotted points used for exit vel/angle estimate (min 2)
+  /** SysId only: 1 = shoot right, -1 = shoot left (mirrors x for angle/sim). */
+  xdir: XDir;
 }
 
 export interface GeneratedTrajectory {

@@ -18,6 +18,7 @@ interface TrajectoryFitEntry {
   launchParams: LaunchParams;
   pixelsPerMeter: PixelsPerMeterSource;
   framerate: number;
+  xdir: 1 | -1;
 }
 
 interface Props {
@@ -28,6 +29,7 @@ interface Props {
   trajectory: TrajectoryPoint[];
   allTrajectories: TrajectoryFitEntry[];
   allVideosTrajectories: TrajectoryFitEntry[];
+  xdir: 1 | -1;
   meterstickScale: MeterstickScale;
   framerate: number;
   onLaunchParamsChange: (p: LaunchParams) => void;
@@ -250,6 +252,7 @@ export default function SimulationControls({
   trajectory,
   allTrajectories,
   allVideosTrajectories,
+  xdir,
   meterstickScale,
   framerate,
   onLaunchParamsChange,
@@ -321,7 +324,8 @@ export default function SimulationControls({
             trajectory,
             launchParams,
             (x) => meterstickScale.getPixelsPerMeter(x),
-            framerate
+            framerate,
+            xdir
           )?.meanDistance ?? null
         : null;
 
@@ -333,7 +337,8 @@ export default function SimulationControls({
           entry.points,
           params,
           entry.pixelsPerMeter,
-          framerate
+          framerate,
+          entry.xdir
         )?.meanDistance ?? null;
       })
       .filter((c): c is number => c !== null && Number.isFinite(c));
@@ -349,6 +354,7 @@ export default function SimulationControls({
     fittableTrajectories,
     meterstickScale,
     framerate,
+    xdir,
   ]);
 
   function formatFitValue(n: number): string {
@@ -465,6 +471,7 @@ export default function SimulationControls({
       magnusPower: t.launchParams.magnusPower ?? 2,
       pixelsPerMeter: t.pixelsPerMeter,
       framerate: t.framerate,
+      xdir: t.xdir,
     }));
 
     const result = await fitDragMagnusAsync(

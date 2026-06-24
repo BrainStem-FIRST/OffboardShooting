@@ -223,12 +223,12 @@ export default function SysIdSidebar({
       const actual = getLaunchParams(stored, seg.id);
       return {
         ...seg,
-        ...empiricalFromPoints(seg.points, ppmSource, framerate, empiricalNumPoints),
+        ...empiricalFromPoints(seg.points, ppmSource, framerate, empiricalNumPoints, selectedVideo?.xdir ?? 1),
         actualSpeed: actual.exitVelocity,
         actualAngle: actual.exitAngle,
       };
     });
-  }, [segments, selectedVideo, meterstick.length, framerate, empiricalNumPoints, selectedVideo?.trajectoryLaunchParams]);
+  }, [segments, selectedVideo, meterstick.length, framerate, empiricalNumPoints, selectedVideo?.trajectoryLaunchParams, selectedVideo?.xdir]);
 
   const numPointsSliderMax = useMemo(() => {
     const longest = segments.reduce((m, s) => Math.max(m, countPlottedPoints(s.points)), 0);

@@ -690,6 +690,7 @@ export default function VideoDisplay({
 
     if (video.showSimulation && scaleReady && launchPoint) {
       const ppmLaunch = meterstickScale.getPixelsPerMeter(launchPoint.x);
+      const xdir = video.xdir ?? 1;
       const simPts = simulateShot(
         exitVelocity,
         exitAngle,
@@ -701,7 +702,7 @@ export default function VideoDisplay({
       );
       ctx.beginPath();
       simPts.forEach((sp, i) => {
-        const cx = launchPoint.x + sp.x * ppmLaunch;
+        const cx = launchPoint.x + xdir * sp.x * ppmLaunch;
         const cy = launchPoint.y - sp.y * ppmLaunch;
         if (i === 0) ctx.moveTo(cx, cy); else ctx.lineTo(cx, cy);
       });
@@ -715,7 +716,7 @@ export default function VideoDisplay({
         const t = (video.currentFrame - launchPoint.frame) / video.framerate;
         const pos = interpSimAtTime(simPts, t, SIM_DT);
         if (pos) {
-          const mx = launchPoint.x + pos.x * ppmLaunch;
+          const mx = launchPoint.x + xdir * pos.x * ppmLaunch;
           const my = launchPoint.y - pos.y * ppmLaunch;
           ctx.beginPath();
           ctx.arc(mx, my, 10, 0, Math.PI * 2);

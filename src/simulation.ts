@@ -42,13 +42,14 @@ export function speedBetweenPoints(
 export function angleBetweenPoints(
   p1: TrajectoryPoint,
   p2: TrajectoryPoint,
-  pixelsPerMeter: PixelsPerMeterSource
+  pixelsPerMeter: PixelsPerMeterSource,
+  xdir: 1 | -1 = 1
 ): number | null {
   if (!isPlottedPoint(p1) || !isPlottedPoint(p2)) return null;
   const ppm = resolvePpm(pixelsPerMeter, (p1.x + p2.x) / 2);
   if (ppm <= 0) return null;
   if (p2.frame - p1.frame <= 0) return null;
-  const physDx = (p2.x - p1.x) / ppm;
+  const physDx = (xdir * (p2.x - p1.x)) / ppm;
   const physDy = (p1.y - p2.y) / ppm;
   return Math.atan2(physDy, physDx) * (180 / Math.PI);
 }
@@ -202,7 +203,8 @@ export function empiricalFromPoints(
   points: TrajectoryPoint[],
   pixelsPerMeter: PixelsPerMeterSource,
   framerate: number,
-  numPoints: number
+  numPoints: number,
+  xdir: 1 | -1 = 1
 ): { speed: number | null; angle: number | null } {
   const sorted = plottedPoints(points).sort((a, b) => a.frame - b.frame);
   const n = Math.max(2, Math.floor(numPoints));
@@ -221,7 +223,7 @@ export function empiricalFromPoints(
   for (let i = 0; i < pairCount; i++) {
     const w = weights[i];
     const speed = speedBetweenPoints(corrected[i], corrected[i + 1], pixelsPerMeter, framerate);
-    const angle = angleBetweenPoints(corrected[i], corrected[i + 1], pixelsPerMeter);
+    const angle = angleBetweenPoints(corrected[i], corrected[i + 1], pixelsPerMeter, xdir);
     if (speed !== null) {
       speedSum += w * speed;
       speedWeightSum += w;
@@ -444,7 +446,8 @@ function buildGrid(lo: number, hi: number, numSplits: number): number[] {
 function preprocessObservations(
   trajectory: TrajectoryPoint[],
   ppmSource: PixelsPerMeterSource,
-  framerate: number
+  framerate: number,
+  xdir: 1 | -1 = 1
 ): { obs: { t: number; x: number; y: number }[]; simMaxTime: number } | null {
   const sorted = plottedPoints(trajectory).sort((a, b) => a.frame - b.frame);
   if (sorted.length < 3 || !ppmValid(ppmSource) || framerate <= 0) return null;
@@ -456,7 +459,7 @@ function preprocessObservations(
     if (ppm <= 0) return null;
     return {
       t: (p.frame - frame0) / framerate,
-      x: (p.x - launch.x) / ppm,
+      x: (xdir * (p.x - launch.x)) / ppm,
       y: (launch.y - p.y) / ppm,
     };
   }).filter((o): o is { t: number; x: number; y: number } => o !== null);
@@ -477,6 +480,7 @@ export interface FitTrajectoryInput {
   magnusPower: number;
   pixelsPerMeter: PixelsPerMeterSource;
   framerate: number;
+  xdir?: 1 | -1;
 }
 
 interface FitObservationSet {
@@ -488,7 +492,12 @@ interface FitObservationSet {
 function buildObservationSets(trajectories: FitTrajectoryInput[]): FitObservationSet[] {
   const sets: FitObservationSet[] = [];
   for (const traj of trajectories) {
-    const prepped = preprocessObservations(traj.points, traj.pixelsPerMeter, traj.framerate);
+    const prepped = preprocessObservations(
+      traj.points,
+      traj.pixelsPerMeter,
+      traj.framerate,
+      traj.xdir ?? 1
+    );
     if (!prepped) continue;
     sets.push({
       ...prepped,
@@ -582,9 +591,10 @@ export function computeTrajectoryFitCost(
     magnusPower: number;
   },
   ppm: PixelsPerMeterSource,
-  framerate: number
+  framerate: number,
+  xdir: 1 | -1 = 1
 ): TrajectoryFitCost | null {
-  const prepped = preprocessObservations(points, ppm, framerate);
+  const prepped = preprocessObservations(points, ppm, framerate, xdir);
   if (!prepped) return null;
   const metrics = evaluateFitCost(
     {
@@ -1135,7 +1145,8 @@ export function computeTrajectoryMoe(
 
   const speedMoe = Math.min(speedMoePlus, speedMoeMinus);
   const angleMoe = Math.min(angleMoePlus, angleMoeMinus);
-  const combinedMoe = Math.min(0.5, speedMoe) * Math.min(angleMoe, 3) * 0.1;
+  // const combinedMoe = Math.min(0.5, speedMoe);
+  const combinedMoe = Math.min(0.5, speedMoe) * Math.min(angleMoe, 1) * 0.1;
 
   return {
     speedMoe,

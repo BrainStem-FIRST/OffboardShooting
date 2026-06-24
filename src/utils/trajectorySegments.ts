@@ -1,4 +1,4 @@
-import { TrajectoryPoint, LaunchParams, Meterstick, MeterstickPoint, VideoData } from '../types';
+import { TrajectoryPoint, LaunchParams, Meterstick, MeterstickPoint, VideoData, XDir } from '../types';
 import { defaultMeterstickPoints, horizontalizeMeterstickPoints, meterstickFromPoints, normalizeSegmentMeters } from './meterstickScale';
 
 export const DEFAULT_LAUNCH_PARAMS: LaunchParams = {
@@ -230,6 +230,7 @@ export interface TrajectorySaveFile {
 export interface ConfigurationSaveFile {
   version: 2;
   videoName: string;
+  xdir?: XDir;
   meterstick: Meterstick;
   meterstickPoints?: MeterstickPoint[];
   meterstickSegmentMeters?: number[];
@@ -246,6 +247,7 @@ export interface ConfigurationSaveFile {
 
 export interface LoadedConfiguration {
   points: TrajectoryPoint[];
+  xdir?: XDir;
   meterstick?: Meterstick;
   meterstickPoints?: MeterstickPoint[];
   meterstickSegmentMeters?: number[];
@@ -253,7 +255,7 @@ export interface LoadedConfiguration {
 }
 
 export function videoToConfigurationSaveFile(
-  video: Pick<VideoData, 'name' | 'trajectory' | 'meterstick' | 'meterstickPoints' | 'meterstickSegmentMeters' | 'trajectoryLaunchParams'>
+  video: Pick<VideoData, 'name' | 'trajectory' | 'meterstick' | 'meterstickPoints' | 'meterstickSegmentMeters' | 'trajectoryLaunchParams' | 'xdir'>
 ): ConfigurationSaveFile {
   const segments = buildTrajectorySegments(video.trajectory);
   const points = horizontalizeMeterstickPoints(video.meterstickPoints);
@@ -261,6 +263,7 @@ export function videoToConfigurationSaveFile(
   return {
     version: 2,
     videoName: video.name,
+    xdir: video.xdir ?? 1,
     meterstick: meterstickFromPoints(points, segmentMeters),
     meterstickPoints: points,
     meterstickSegmentMeters: segmentMeters,
@@ -307,6 +310,7 @@ function configurationSaveFileToLoaded(data: ConfigurationSaveFile): LoadedConfi
     : undefined;
   return {
     points,
+    xdir: data.xdir === -1 ? -1 : 1,
     meterstick: meterstickPts ? meterstickFromPoints(meterstickPts, segmentMeters) : data.meterstick,
     meterstickPoints: meterstickPts,
     meterstickSegmentMeters: segmentMeters,
