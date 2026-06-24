@@ -1,6 +1,7 @@
 import type { GeneratedTrajectory, TrajGenParams, TrajectoryPoint, TrajGroup } from './types';
 import { isPlottedPoint, plottedPoints } from './utils/trajectorySegments';
 import type { PixelsPerMeterFn } from './utils/meterstickScale';
+import { buildStoreZip } from './utils/zipStore';
 
 export type PixelsPerMeterSource = number | PixelsPerMeterFn;
 
@@ -354,6 +355,14 @@ export interface FitProgress {
   progress: number;
 }
 
+export interface TrajGenProgress {
+  phase: 'searching' | 'refining';
+  current: number;
+  total: number;
+  found: number;
+  progress: number;
+}
+
 export interface FitRankEntry {
   rank: number;
   visibleMeanDistance: number;
@@ -405,6 +414,7 @@ export function computeFitTotalEvals(
 
 const FIT_PENALTY = 100;
 const FIT_YIELD_EVERY = 8;
+const TRAJ_GEN_YIELD_EVERY = 50;
 
 type FitDimKey = 'velocity' | 'angle' | 'drag' | 'magnus' | 'magnusPower';
 
@@ -1038,8 +1048,8 @@ export function generateTrajectories(
   magnus: number
 ): GeneratedTrajectory[] {
   const results: GeneratedTrajectory[] = [];
-  const xMin = params.dxMin - params.errorTolerance;
-  const xMax = params.dxMax + params.errorTolerance;
+  const xMin = params.dxMin - params.errorTolerance * 0.5;
+  const xMax = params.dxMax + params.errorTolerance * 0.5;
 
   let vel = params.velocityMin;
   while (vel <= params.velocityMax + 1e-9) {
@@ -1071,56 +1081,77 @@ export function generateTrajectories(
   return results;
 }
 
-// Generate trajectories once, assign each to the nearest distance interval, refine, and group.
-export function generateAndRefineTrajectoryGroups(
+export function countTrajGenCombinations(params: TrajGenParams): number {
+  let count = 0;
+  let vel = params.velocityMin;
+  while (vel <= params.velocityMax + 1e-9) {
+    let angle = params.exitAngleMin;
+    while (angle <= params.exitAngleMax + 1e-9) {
+      count++;
+      angle = Math.round((angle + params.angleStep) * 1e6) / 1e6;
+    }
+    vel = Math.round((vel + params.velocityStep) * 1e6) / 1e6;
+  }
+  return count;
+}
+
+function assignRefinedTrajectory(
+  traj: GeneratedTrajectory,
+  params: TrajGenParams,
+  dxValues: number[],
+  groupTrajs: Map<number, GeneratedTrajectory[]>,
+  drag: number,
+  magnus: number
+): void {
+  const targetDx = closestIntervalPosition(traj.landingX, dxValues);
+  const gParams = { ...params, dx: targetDx };
+  const { trajectory: refined, successfulBracket, accurate } = refineTrajectory(
+    traj,
+    gParams,
+    drag,
+    magnus,
+      REFINE_MAX_ITER,
+      REFINE_THRESHOLD_M,
+      'angle'
+  );
+
+  if (!successfulBracket) {
+    groupTrajs.get(targetDx)!.push(refined);
+    return;
+  }
+
+  const impact = simulateImpactAngle(
+    refined.exitVelocity,
+    refined.exitAngle,
+    drag,
+    magnus,
+    targetDx
+  );
+  const withImpact = {
+    ...refined,
+    impactAngle: impact !== null ? Math.round(impact * 100) / 100 : refined.impactAngle,
+    landingX: targetDx,
+  };
+  const landing = simulateLanding(refined.exitVelocity, refined.exitAngle, drag, magnus, params.dy);
+  const inGoal =
+    successfulBracket &&
+    landing !== null &&
+    Math.abs(landing.landingX - targetDx) <= params.errorTolerance / 2;
+  const finalTraj: GeneratedTrajectory = {
+    ...withImpact,
+    successfulBracket: inGoal,
+    accurate: inGoal && accurate,
+  };
+  groupTrajs.get(targetDx)!.push(finalTraj);
+}
+
+function buildTrajectoryGroups(
+  dxValues: number[],
+  groupTrajs: Map<number, GeneratedTrajectory[]>,
   params: TrajGenParams,
   drag: number,
   magnus: number
 ): TrajGroup[] {
-  const dxValues = enumerateDxValues(params.dxMin, params.dxMax, params.dxStep);
-  if (dxValues.length === 0) return [];
-
-  const raw = generateTrajectories(params, drag, magnus);
-  const groupTrajs = new Map<number, GeneratedTrajectory[]>();
-  for (const dx of dxValues) groupTrajs.set(dx, []);
-
-  for (const traj of raw) {
-    const targetDx = closestIntervalPosition(traj.landingX, dxValues);
-    const gParams = { ...params, dx: targetDx };
-    const { trajectory: refined, successfulBracket, accurate } = refineTrajectory(
-      traj,
-      gParams,
-      drag,
-      magnus,
-      params.refineMaxIter,
-      params.refineThreshold,
-      'angle'
-    );
-    const impact = simulateImpactAngle(
-      refined.exitVelocity,
-      refined.exitAngle,
-      drag,
-      magnus,
-      targetDx
-    );
-    const withImpact = {
-      ...refined,
-      impactAngle: impact !== null ? Math.round(impact * 100) / 100 : refined.impactAngle,
-      landingX: targetDx,
-    };
-    const landing = simulateLanding(refined.exitVelocity, refined.exitAngle, drag, magnus, params.dy);
-    const inGoal =
-      successfulBracket &&
-      landing !== null &&
-      Math.abs(landing.landingX - targetDx) <= params.errorTolerance / 2;
-    const finalTraj: GeneratedTrajectory = {
-      ...withImpact,
-      successfulBracket: inGoal,
-      accurate: inGoal && accurate,
-    };
-    groupTrajs.get(targetDx)!.push(finalTraj);
-  }
-
   const batchId = Date.now();
   const groups: TrajGroup[] = dxValues.map((dx) => {
     const trajectories = dedupeTrajectories(groupTrajs.get(dx) ?? []);
@@ -1135,6 +1166,212 @@ export function generateAndRefineTrajectoryGroups(
   });
 
   return groups.filter((g) => g.trajectories.length > 0);
+}
+
+// Generate trajectories once, assign each to the nearest distance interval, refine, and group.
+export function generateAndRefineTrajectoryGroups(
+  params: TrajGenParams,
+  drag: number,
+  magnus: number
+): TrajGroup[] {
+  const dxValues = enumerateDxValues(params.dxMin, params.dxMax, params.dxStep);
+  if (dxValues.length === 0) return [];
+
+  const raw = generateTrajectories(params, drag, magnus);
+  const groupTrajs = new Map<number, GeneratedTrajectory[]>();
+  for (const dx of dxValues) groupTrajs.set(dx, []);
+
+  for (const traj of raw) {
+    assignRefinedTrajectory(traj, params, dxValues, groupTrajs, drag, magnus);
+  }
+
+  return buildTrajectoryGroups(dxValues, groupTrajs, params, drag, magnus);
+}
+
+function assignUnrefinedToGroups(
+  raw: GeneratedTrajectory[],
+  dxValues: number[],
+  groupTrajs: Map<number, GeneratedTrajectory[]>
+): void {
+  for (const traj of raw) {
+    const targetDx = closestIntervalPosition(traj.landingX, dxValues);
+    groupTrajs.get(targetDx)!.push(traj);
+  }
+}
+
+// Async search-only: sweep angle × velocity and group candidates without refining.
+export function generateTrajectoriesAsync(
+  params: TrajGenParams,
+  drag: number,
+  magnus: number,
+  onProgress: (progress: TrajGenProgress) => void,
+  signal: { cancelled: boolean }
+): Promise<TrajGroup[]> {
+  return new Promise((resolve) => {
+    const dxValues = enumerateDxValues(params.dxMin, params.dxMax, params.dxStep);
+    if (dxValues.length === 0) {
+      resolve([]);
+      return;
+    }
+
+    const totalCombos = countTrajGenCombinations(params);
+    const xMin = params.dxMin - params.errorTolerance;
+    const xMax = params.dxMax + params.errorTolerance;
+    const raw: GeneratedTrajectory[] = [];
+    let comboIndex = 0;
+    let vel = params.velocityMin;
+    let angle = params.exitAngleMin;
+
+    function reportSearch() {
+      onProgress({
+        phase: 'searching',
+        current: comboIndex,
+        total: totalCombos,
+        found: raw.length,
+        progress: totalCombos > 0 ? comboIndex / totalCombos : 0,
+      });
+    }
+
+    function searchStep() {
+      if (signal.cancelled) {
+        resolve([]);
+        return;
+      }
+
+      let batch = TRAJ_GEN_YIELD_EVERY;
+      while (batch > 0 && vel <= params.velocityMax + 1e-9) {
+        while (angle <= params.exitAngleMax + 1e-9) {
+          const landing = simulateLanding(vel, angle, drag, magnus, params.dy);
+          if (
+            landing !== null &&
+            landing.landingX >= xMin &&
+            landing.landingX <= xMax
+          ) {
+            const impact = simulateImpactAngle(vel, angle, drag, magnus, landing.landingX);
+            if (impact !== null && impact >= params.impactAngleMin && impact <= params.impactAngleMax) {
+              raw.push({
+                id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+                exitVelocity: Math.round(vel * 100) / 100,
+                exitAngle: Math.round(angle * 100) / 100,
+                impactAngle: Math.round(impact * 100) / 100,
+                timeOfFlight: Math.round(landing.timeOfFlight * 1000) / 1000,
+                landingX: Math.round(landing.landingX * 1000) / 1000,
+              });
+            }
+          }
+
+          comboIndex++;
+          angle = Math.round((angle + params.angleStep) * 1e6) / 1e6;
+          batch--;
+          if (batch === 0) break;
+        }
+
+        if (angle > params.exitAngleMax + 1e-9) {
+          vel = Math.round((vel + params.velocityStep) * 1e6) / 1e6;
+          angle = params.exitAngleMin;
+        }
+      }
+
+      if (vel <= params.velocityMax + 1e-9) {
+        reportSearch();
+        setTimeout(searchStep, 0);
+        return;
+      }
+
+      onProgress({
+        phase: 'searching',
+        current: totalCombos,
+        total: totalCombos,
+        found: raw.length,
+        progress: 1,
+      });
+
+      const groupTrajs = new Map<number, GeneratedTrajectory[]>();
+      for (const dx of dxValues) groupTrajs.set(dx, []);
+      assignUnrefinedToGroups(raw, dxValues, groupTrajs);
+      resolve(buildTrajectoryGroups(dxValues, groupTrajs, params, drag, magnus));
+    }
+
+    reportSearch();
+    setTimeout(searchStep, 0);
+  });
+}
+
+// Async refine-only: refine existing candidates and regroup by distance interval.
+export function refineTrajectoriesAsync(
+  raw: GeneratedTrajectory[],
+  params: TrajGenParams,
+  drag: number,
+  magnus: number,
+  onProgress: (progress: TrajGenProgress) => void,
+  signal: { cancelled: boolean }
+): Promise<TrajGroup[]> {
+  return new Promise((resolve) => {
+    const dxValues = enumerateDxValues(params.dxMin, params.dxMax, params.dxStep);
+    if (dxValues.length === 0 || raw.length === 0) {
+      resolve([]);
+      return;
+    }
+
+    const groupTrajs = new Map<number, GeneratedTrajectory[]>();
+    for (const dx of dxValues) groupTrajs.set(dx, []);
+
+    function reportRefine(index: number) {
+      const total = raw.length;
+      onProgress({
+        phase: 'refining',
+        current: index,
+        total,
+        found: raw.length,
+        progress: total > 0 ? index / total : 0,
+      });
+    }
+
+    function refineStep(index: number) {
+      if (signal.cancelled) {
+        resolve([]);
+        return;
+      }
+
+      if (index >= raw.length) {
+        onProgress({
+          phase: 'refining',
+          current: raw.length,
+          total: raw.length,
+          found: raw.length,
+          progress: 1,
+        });
+        resolve(buildTrajectoryGroups(dxValues, groupTrajs, params, drag, magnus));
+        return;
+      }
+
+      assignRefinedTrajectory(raw[index], params, dxValues, groupTrajs, drag, magnus);
+      reportRefine(index + 1);
+
+      const advance = () => refineStep(index + 1);
+      if ((index + 1) % TRAJ_GEN_YIELD_EVERY === 0) setTimeout(advance, 0);
+      else advance();
+    }
+
+    reportRefine(0);
+    setTimeout(() => refineStep(0), 0);
+  });
+}
+
+// Async variant that reports search/refine progress and yields to the UI thread.
+export function generateAndRefineTrajectoryGroupsAsync(
+  params: TrajGenParams,
+  drag: number,
+  magnus: number,
+  onProgress: (progress: TrajGenProgress) => void,
+  signal: { cancelled: boolean }
+): Promise<TrajGroup[]> {
+  return generateTrajectoriesAsync(params, drag, magnus, onProgress, signal).then((groups) => {
+    if (signal.cancelled) return [];
+    const raw = groups.flatMap((g) => g.trajectories);
+    if (raw.length === 0) return [];
+    return refineTrajectoriesAsync(raw, params, drag, magnus, onProgress, signal);
+  });
 }
 
 // Helper: compute landingX at goal height for a given search variable, holding the other constant
@@ -1152,98 +1389,108 @@ function landingXAtGoalHeight(
   return result ? result.landingX : null;
 }
 
-// Refine a single trajectory using binary search.
-// constMode='velocity': hold velocity, vary angle in 0.5° steps to bracket
-// constMode='angle': hold angle, vary velocity in 0.05 m/s steps to bracket
-export function refineTrajectory(
-  traj: GeneratedTrajectory,
-  params: TrajGenParams,
-  drag: number,
-  magnus: number,
-  maxIter: number,
-  threshold: number,
-  constMode: 'velocity' | 'angle' = 'velocity'
-): { trajectory: GeneratedTrajectory; successfulBracket: boolean; accurate: boolean } {
-  const targetDx = params.dx;
-  const targetDy = params.dy;
-  const fixed = constMode === 'velocity' ? traj.exitVelocity : traj.exitAngle;
-  const initSearch = constMode === 'velocity' ? traj.exitAngle : traj.exitVelocity;
-  const step = constMode === 'velocity' ? 0.5 : 0.05; // degrees or m/s
+type RefineFailureReason = 'bracket' | 'target_height';
 
-  const err0 = (() => {
-    const x = landingXAtGoalHeight(initSearch, fixed, constMode, drag, magnus, targetDy);
-    return x !== null ? x - targetDx : null;
-  })();
+interface RefineResult {
+  trajectory: GeneratedTrajectory;
+  successfulBracket: boolean;
+  accurate: boolean;
+  failureReason?: RefineFailureReason;
+}
+
+export const REFINE_MAX_ITER = 200;
+export const REFINE_THRESHOLD_M = 0.001; // 1 mm
+
+const REFINE_WALK_STEP = 0.1;
+const REFINE_NULL_STEP = 0.05;
+const REFINE_MAX_WALK = 5000;
+
+type BracketFindResult =
+  | { status: 'exact' }
+  | { status: 'bracketed'; lo: number; hi: number }
+  | { status: 'failed'; reason: RefineFailureReason };
+
+function findSearchBracket(
+  initSearch: number,
+  errorAt: (searchVal: number) => number | null,
+  threshold: number
+): BracketFindResult {
+  const err0 = errorAt(initSearch);
   if (err0 === null) {
-    return { trajectory: { ...traj, successfulBracket: false, accurate: false }, successfulBracket: false, accurate: false };
+    return { status: 'failed', reason: 'target_height' };
   }
   if (Math.abs(err0) < threshold) {
-    const final = simulateLanding(
-      constMode === 'velocity' ? fixed : initSearch,
-      constMode === 'velocity' ? initSearch : fixed,
-      drag, magnus, targetDy
-    );
-    return {
-      trajectory: {
-        ...traj,
-        landingX: targetDx,
-        successfulBracket: true,
-        accurate: true,
-        timeOfFlight: final ? Math.round(final.timeOfFlight * 1000) / 1000 : traj.timeOfFlight,
-      },
-      successfulBracket: true,
-      accurate: true,
-    };
+    return { status: 'exact' };
   }
 
-  const errPos = (() => {
-    const x = landingXAtGoalHeight(initSearch + step, fixed, constMode, drag, magnus, targetDy);
-    return x !== null ? x - targetDx : null;
-  })();
-  const errNeg = (() => {
-    const x = landingXAtGoalHeight(initSearch - step, fixed, constMode, drag, magnus, targetDy);
-    return x !== null ? x - targetDx : null;
-  })();
-
-  // Choose direction: prefer the side whose error is smaller in magnitude
-  // (that's the direction moving toward the root)
-  let dir = 1; // +step direction by default
-  if (errPos === null && errNeg === null) {
-    return { trajectory: { ...traj, successfulBracket: false, accurate: false }, successfulBracket: false, accurate: false };
-  }
-  if (errPos === null) dir = -1;
-  else if (errNeg === null) dir = 1;
-  else dir = Math.abs(errPos) < Math.abs(errNeg) ? 1 : -1;
-
-  // Walk in the chosen direction until error changes sign (bracket found)
-  let a = initSearch;
-  let errA = err0;
-  let b = initSearch + dir * step;
-  let errB = dir === 1 ? (errPos ?? err0) : (errNeg ?? err0);
-  let found = errA * errB < 0;
-
-  for (let i = 0; i < 400 && !found; i++) {
-    a = b;
-    errA = errB;
-    b = a + dir * step;
-    const x = landingXAtGoalHeight(b, fixed, constMode, drag, magnus, targetDy);
-    if (x === null) break;
-    errB = x - targetDx;
-    if (errA * errB < 0) { found = true; }
+  if (err0 < 0) {
+    let lo = initSearch;
+    let v = initSearch;
+    for (let i = 0; i < REFINE_MAX_WALK; i++) {
+      v += REFINE_WALK_STEP;
+      const err = errorAt(v);
+      if (err === null) continue;
+      if (err > 0) {
+        return { status: 'bracketed', lo, hi: v };
+      }
+      lo = v;
+    }
+    return { status: 'failed', reason: 'bracket' };
   }
 
-  // If no bracket found, return original trajectory unchanged
-  if (!found) {
-    return { trajectory: { ...traj, successfulBracket: false, accurate: false }, successfulBracket: false, accurate: false };
+  let lastLong = initSearch;
+  let v = initSearch;
+  for (let i = 0; i < REFINE_MAX_WALK; i++) {
+    v -= REFINE_WALK_STEP;
+    const err = errorAt(v);
+    if (err === null) {
+      return recoverBracketAfterNull(v, lastLong, errorAt);
+    }
+    if (err < 0) {
+      return { status: 'bracketed', lo: v, hi: lastLong };
+    }
+    lastLong = v;
   }
+  return { status: 'failed', reason: 'bracket' };
+}
 
-  // Ensure lo < hi
-  let lo = Math.min(a, b);
-  let hi = Math.max(a, b);
+function recoverBracketAfterNull(
+  vNull: number,
+  lastLong: number,
+  errorAt: (searchVal: number) => number | null
+): BracketFindResult {
+  let step = REFINE_NULL_STEP;
+  let hi = lastLong;
+  for (let i = 0; i < 10; i++) {
+    const v = vNull - step;
+    const err = errorAt(v);
+    if (err !== null) {
+      if (err < 0) {
+        return { status: 'bracketed', lo: v, hi };
+      }
+      hi = v;
+    }
+    step /= 2;
+  }
+  return { status: 'failed', reason: 'target_height' };
+}
+
+function binarySearchLandingX(
+  lo: number,
+  hi: number,
+  fixed: number,
+  constMode: 'velocity' | 'angle',
+  drag: number,
+  magnus: number,
+  targetDx: number,
+  targetDy: number,
+  maxIter: number,
+  threshold: number
+): number {
   let xLo = landingXAtGoalHeight(lo, fixed, constMode, drag, magnus, targetDy);
   let xHi = landingXAtGoalHeight(hi, fixed, constMode, drag, magnus, targetDy);
   if (xLo === null || xHi === null) {
-    return { trajectory: { ...traj, successfulBracket: false, accurate: false }, successfulBracket: false, accurate: false };
+    return (lo + hi) / 2;
   }
 
   for (let i = 0; i < maxIter; i++) {
@@ -1258,7 +1505,7 @@ export function refineTrajectory(
       break;
     }
 
-    if ((xLo! - targetDx) * err < 0) {
+    if ((xLo - targetDx) * err < 0) {
       hi = mid;
       xHi = xMid;
     } else {
@@ -1267,7 +1514,80 @@ export function refineTrajectory(
     }
   }
 
-  const bestSearch = (lo + hi) / 2;
+  return (lo + hi) / 2;
+}
+
+function refineFailed(
+  traj: GeneratedTrajectory,
+  reason: RefineFailureReason
+): RefineResult {
+  return {
+    trajectory: { ...traj, successfulBracket: false, accurate: false, refineFailure: reason },
+    successfulBracket: false,
+    accurate: false,
+    failureReason: reason,
+  };
+}
+
+// Refine a single trajectory: walk in 0.1 m/s (or 0.1°) steps to bracket, then binary search.
+export function refineTrajectory(
+  traj: GeneratedTrajectory,
+  params: TrajGenParams,
+  drag: number,
+  magnus: number,
+  maxIter: number,
+  threshold: number,
+  constMode: 'velocity' | 'angle' = 'velocity'
+): RefineResult {
+  const targetDx = params.dx;
+  const targetDy = params.dy;
+  const fixed = constMode === 'velocity' ? traj.exitVelocity : traj.exitAngle;
+  const initSearch = constMode === 'velocity' ? traj.exitAngle : traj.exitVelocity;
+
+  const errorAt = (searchVal: number): number | null => {
+    const x = landingXAtGoalHeight(searchVal, fixed, constMode, drag, magnus, targetDy);
+    return x !== null ? x - targetDx : null;
+  };
+
+  const bracket = findSearchBracket(initSearch, errorAt, threshold);
+
+  if (bracket.status === 'failed') {
+    return refineFailed(traj, bracket.reason);
+  }
+
+  if (bracket.status === 'exact') {
+    const final = simulateLanding(
+      constMode === 'velocity' ? fixed : initSearch,
+      constMode === 'velocity' ? initSearch : fixed,
+      drag, magnus, targetDy
+    );
+    return {
+      trajectory: {
+        ...traj,
+        landingX: targetDx,
+        successfulBracket: true,
+        accurate: true,
+        refineFailure: undefined,
+        timeOfFlight: final ? Math.round(final.timeOfFlight * 1000) / 1000 : traj.timeOfFlight,
+      },
+      successfulBracket: true,
+      accurate: true,
+    };
+  }
+
+  const bestSearch = binarySearchLandingX(
+    bracket.lo,
+    bracket.hi,
+    fixed,
+    constMode,
+    drag,
+    magnus,
+    targetDx,
+    targetDy,
+    maxIter,
+    threshold
+  );
+
   const bestV = constMode === 'velocity' ? fixed : bestSearch;
   const bestA = constMode === 'velocity' ? bestSearch : fixed;
   const final = simulateLanding(bestV, bestA, drag, magnus, targetDy);
@@ -1283,6 +1603,7 @@ export function refineTrajectory(
     timeOfFlight: final ? Math.round(final.timeOfFlight * 1000) / 1000 : traj.timeOfFlight,
     successfulBracket: true,
     accurate,
+    refineFailure: undefined,
   };
   return { trajectory: refined, successfulBracket: true, accurate };
 }
@@ -1350,80 +1671,35 @@ export function groupExportPayload(group: TrajGroup) {
   };
 }
 
-export function groupExportFileName(baseName: string, group: TrajGroup): string {
-  const name = (baseName.trim() || 'trajectories').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
-  return `${name} (${group.dx.toFixed(3)}, ${group.dy.toFixed(3)}).json`;
+export function groupExportFileName(group: TrajGroup): string {
+  return `(${group.dx}, ${group.dy}).json`;
 }
 
-export type ExportTrajectoriesResult =
-  | { ok: true; count: number }
-  | { ok: false; cancelled: true }
-  | { ok: false; cancelled: false; message: string };
-
-async function ensureDirWritePermission(dirHandle: FileSystemDirectoryHandle): Promise<boolean> {
-  if ((await dirHandle.queryPermission({ mode: 'readwrite' })) === 'granted') return true;
-  return (await dirHandle.requestPermission({ mode: 'readwrite' })) === 'granted';
+function sanitizeArchiveName(name: string): string {
+  return name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
 }
 
-/** Pick a folder once and write one JSON file per group. */
-export async function exportTrajectoriesToFolder(
-  groups: TrajGroup[],
-  baseName: string
-): Promise<ExportTrajectoriesResult> {
+export function exportFolderName(params: TrajGenParams): string {
+  const { dxMin, dxMax, dy } = params;
+  return sanitizeArchiveName(`trajectories(${dxMin}, ${dy})_to_(${dxMax}, ${dy})`);
+}
+
+/** Download a zip; extracting yields folder trajectories(xmin,y)_to_(xmax,y) with (dx,dy).json files. */
+export function downloadTrajectoriesArchive(groups: TrajGroup[], params: TrajGenParams): void {
   const groupsWithTrajs = groups.filter((g) => g.trajectories.length > 0);
-  if (groupsWithTrajs.length === 0) {
-    return { ok: false, cancelled: false, message: 'No trajectories to export.' };
-  }
+  if (groupsWithTrajs.length === 0) return;
 
-  if (typeof window.showDirectoryPicker !== 'function') {
-    return {
-      ok: false,
-      cancelled: false,
-      message: 'Folder export requires Chrome or Edge. Your browser does not support folder selection.',
-    };
-  }
+  const folderName = exportFolderName(params);
+  const entries = groupsWithTrajs.map((g) => ({
+    name: `${folderName}/${groupExportFileName(g)}`,
+    data: new TextEncoder().encode(JSON.stringify(groupExportPayload(g), null, 4)),
+  }));
 
-  let dirHandle: FileSystemDirectoryHandle;
-  try {
-    dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
-  } catch (err) {
-    if ((err as DOMException).name === 'AbortError') {
-      return { ok: false, cancelled: true };
-    }
-    return { ok: false, cancelled: false, message: `Could not open folder: ${(err as Error).message}` };
-  }
-
-  if (!(await ensureDirWritePermission(dirHandle))) {
-    return { ok: false, cancelled: false, message: 'Write permission was denied for the selected folder.' };
-  }
-
-  for (const g of groupsWithTrajs) {
-    const fileName = groupExportFileName(baseName, g);
-    const content = JSON.stringify(groupExportPayload(g), null, 4);
-    const blob = new Blob([content], { type: 'application/json' });
-
-    try {
-      const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
-      const writable = await fileHandle.createWritable();
-      try {
-        await writable.write(blob);
-        await writable.close();
-      } catch (writeErr) {
-        try {
-          await writable.abort();
-        } catch {
-          /* ignore */
-        }
-        throw writeErr;
-      }
-    } catch (err) {
-      return {
-        ok: false,
-        cancelled: false,
-        message: `Failed to write "${fileName}": ${(err as Error).message}`,
-      };
-    }
-  }
-
-  return { ok: true, count: groupsWithTrajs.length };
+  const blob = buildStoreZip(entries);
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `${folderName}.zip`;
+  link.click();
+  URL.revokeObjectURL(url);
 }

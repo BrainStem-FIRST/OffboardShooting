@@ -7,8 +7,8 @@ import SimulationControls from './components/SimulationControls';
 import TrajectoryGenCanvas from './components/TrajectoryGenCanvas';
 import TrajectoryGenLeft from './components/TrajectoryGenLeft';
 import TrajectoryGenRight from './components/TrajectoryGenRight';
-import { generateAndRefineTrajectoryGroups } from './simulation';
-import { buildTrajectorySegments, resolveActiveSegment, getLaunchParams, createSkippedPoint } from './utils/trajectorySegments';
+import { generateTrajectoriesAsync, refineTrajectoriesAsync, type TrajGenProgress } from './simulation';
+import { buildTrajectorySegments, resolveActiveSegment, getLaunchParams, createSkippedPoint, firstTrajectoryPoint } from './utils/trajectorySegments';
 import type { ImportedProjectEntry } from './utils/projectIO';
 import { MeterstickScale, defaultMeterstickPoints, scaleToPpmFn, horizontalizeMeterstickPoints, meterstickFromPoints, adjustSegmentMetersForPointChange, normalizeSegmentMeters, defaultSegmentMeters } from './utils/meterstickScale';
 
@@ -110,8 +110,9 @@ export default function App() {
   const [trajGenParams, setTrajGenParams] = useState<TrajGenParams>(DEFAULT_TRAJGEN_PARAMS);
   const [trajGroups, setTrajGroups] = useState<TrajGroup[]>([]);
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
-  const [selectedTrajId, setSelectedTrajId] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
+  const [refining, setRefining] = useState(false);
+  const [genProgress, setGenProgress] = useState<TrajGenProgress | null>(null);
   const [hoveredTrajId, setHoveredTrajId] = useState<string | null>(null);
 
   // Panel sizing
@@ -311,6 +312,10 @@ export default function App() {
           video.trajectoryLaunchParams = entry.config.trajectoryLaunchParams;
         }
       }
+      const firstPt = firstTrajectoryPoint(video.trajectory);
+      if (firstPt) {
+        video.currentFrame = firstPt.frame;
+      }
       return video;
     });
     setVideos((prev) => {
@@ -320,9 +325,11 @@ export default function App() {
     undoStack.current = [];
     redoStack.current = [];
     bumpHistory();
-    setFocusedTrajectoryId(null);
+    const firstVideo = newVideos[0];
+    const firstSegments = firstVideo ? buildTrajectorySegments(firstVideo.trajectory) : [];
+    setFocusedTrajectoryId(firstSegments[0]?.id ?? null);
     setPlottingMode(false);
-    setSelectedId(newVideos.length > 0 ? newVideos[0].id : null);
+    setSelectedId(firstVideo?.id ?? null);
   }, []);
 
   const handleStepFrame = useCallback(
@@ -471,38 +478,67 @@ export default function App() {
   function handleClearAll() {
     setTrajGroups([]);
     setSelectedGroupId(null);
-    setSelectedTrajId(null);
+    setHoveredTrajId(null);
   }
 
-  function handleGenerate() {
+  async function handleGenerate() {
     const drag = trajGenParams.dragCoefficient;
     const magnus = trajGenParams.magnusGain;
+    const signal = { cancelled: false };
     setGenerating(true);
-    setTimeout(() => {
-      handleClearAll();
-      const newGroups = generateAndRefineTrajectoryGroups(trajGenParams, drag, magnus);
+    setGenProgress(null);
+    handleClearAll();
+    const newGroups = await generateTrajectoriesAsync(
+      trajGenParams,
+      drag,
+      magnus,
+      (p) => setGenProgress(p),
+      signal
+    );
+    if (!signal.cancelled) {
       setTrajGroups(newGroups);
       if (newGroups.length > 0) {
         setSelectedGroupId(newGroups[0].id);
-        setSelectedTrajId(newGroups[0].trajectories.length > 0 ? newGroups[0].trajectories[0].id : null);
       }
-      setGenerating(false);
-    }, 0);
+    }
+    setGenerating(false);
+    setGenProgress(null);
   }
 
-  function handleBatchUpdateGroups(updates: { groupId: string; trajectories: GeneratedTrajectory[] }[]) {
-    if (updates.length === 0) return;
-    const byId = new Map(updates.map((u) => [u.groupId, u.trajectories]));
-    setTrajGroups((prev) =>
-      prev.map((g) => (byId.has(g.id) ? { ...g, trajectories: byId.get(g.id)! } : g))
+  async function handleRefine() {
+    const raw = trajGroups.flatMap((g) => g.trajectories);
+    if (raw.length === 0) return;
+    const drag = trajGenParams.dragCoefficient;
+    const magnus = trajGenParams.magnusGain;
+    const signal = { cancelled: false };
+    setRefining(true);
+    setGenProgress(null);
+    const newGroups = await refineTrajectoriesAsync(
+      raw,
+      trajGenParams,
+      drag,
+      magnus,
+      (p) => setGenProgress(p),
+      signal
     );
+    if (!signal.cancelled) {
+      setTrajGroups(newGroups);
+      if (newGroups.length > 0) {
+        const keepGroup = selectedGroupId && newGroups.some((g) => g.id === selectedGroupId);
+        if (!keepGroup) setSelectedGroupId(newGroups[0].id);
+      } else {
+        setSelectedGroupId(null);
+      }
+    }
+    setRefining(false);
+    setGenProgress(null);
   }
 
   function handleDeleteTraj(groupId: string, trajId: string) {
     setTrajGroups(prev => prev.map(g => {
       if (g.id !== groupId) return g;
       const next = g.trajectories.filter(t => t.id !== trajId);
-      if (selectedTrajId === trajId) setSelectedTrajId(next.length > 0 ? next[0].id : null);
+      if (hoveredTrajId === trajId) setHoveredTrajId(null);
       return { ...g, trajectories: next };
     }));
   }
@@ -511,10 +547,7 @@ export default function App() {
     setTrajGroups(prev => {
       const next = prev.filter(g => g.id !== groupId);
       if (selectedGroupId === groupId) {
-        const newSel = next.length > 0 ? next[next.length - 1].id : null;
-        setSelectedGroupId(newSel);
-        const newGroup = next.find(g => g.id === newSel);
-        setSelectedTrajId(newGroup && newGroup.trajectories.length > 0 ? newGroup.trajectories[0].id : null);
+        setSelectedGroupId(next.length > 0 ? next[next.length - 1].id : null);
       }
       return next;
     });
@@ -526,7 +559,8 @@ export default function App() {
       <header className="flex-shrink-0 bg-gray-900 border-b border-gray-700 px-6 pt-3.5 pb-0">
         <div className="flex items-end justify-between">
           <h1 className="text-xl font-bold tracking-tight pb-3">
-            <span style={{ color: '#4a7fd4' }}>Brain</span><span style={{ color: '#3cb54a' }}>S</span><span style={{ color: '#e04020' }}>T</span><span style={{ color: '#4a7fd4' }}>E</span><span style={{ color: '#e8b020' }}>M</span><span style={{ color: '#4a7fd4' }}> Shooting Simulator</span>
+            <span style={{ color: '#4a7fd4' }}>Brain</span><span style={{ color: '#3cb54a' }}>S</span><span style={{ color: '#4a7fd4' }}>T</span><span style={{ color: '#e04020' }}>E</span><span style={{ color: '#e8b020' }}>M</span><span style={{ color: '#4a7fd4' }}> Shooting Simulator</span>
+       
           </h1>
           {/* Tabs */}
           <div className="flex items-end gap-1">
@@ -748,7 +782,11 @@ export default function App() {
                 params={trajGenParams}
                 onChange={setTrajGenParams}
                 onGenerate={handleGenerate}
+                onRefine={handleRefine}
                 generating={generating}
+                refining={refining}
+                canRefine={trajGroups.some((g) => g.trajectories.length > 0)}
+                genProgress={genProgress}
                 width={leftWidth}
               />
             </div>
@@ -778,8 +816,8 @@ export default function App() {
                 params={trajGenParams}
                 groups={trajGroups}
                 selectedGroupId={selectedGroup?.id ?? null}
-                selectedId={selectedTrajId}
                 hoveredId={hoveredTrajId}
+                onHoverTraj={setHoveredTrajId}
               />
             </main>
 
@@ -810,25 +848,17 @@ export default function App() {
               <TrajectoryGenRight
                 groups={trajGroups}
                 selectedGroupId={selectedGroup?.id ?? null}
-                selectedTrajId={selectedTrajId}
                 hoveredTrajId={hoveredTrajId}
-                onSelectGroup={(id) => {
-                  setSelectedGroupId(id);
-                  const g = trajGroups.find(g => g.id === id);
-                  setSelectedTrajId(g && g.trajectories.length > 0 ? g.trajectories[0].id : null);
-                }}
-                onSelectTraj={setSelectedTrajId}
+                onSelectGroup={setSelectedGroupId}
                 onHoverTraj={setHoveredTrajId}
                 onDeleteTraj={handleDeleteTraj}
                 onDeleteGroup={handleDeleteGroup}
                 onUpdateGroup={(groupId, trajs) => {
                   setTrajGroups(prev => prev.map(g => g.id === groupId ? { ...g, trajectories: trajs } : g));
                 }}
-                onBatchUpdateGroups={handleBatchUpdateGroups}
                 onImportGroup={(group) => {
                   setTrajGroups(prev => [...prev, group]);
                   setSelectedGroupId(group.id);
-                  setSelectedTrajId(group.trajectories.length > 0 ? group.trajectories[0].id : null);
                 }}
                 onClearAll={handleClearAll}
                 params={trajGenParams}

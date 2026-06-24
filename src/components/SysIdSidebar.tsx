@@ -422,23 +422,6 @@ export default function SysIdSidebar({
             return;
           }
 
-          let confirmMsg = `Import ${preview.pairs.length} video(s) and replace the current session?\n\n`;
-          for (const pair of preview.pairs) {
-            confirmMsg += `• ${pair.videoName}`;
-            confirmMsg += pair.configName ? ` + ${pair.configName}` : ' (no config)';
-            confirmMsg += '\n';
-          }
-          if (preview.orphanConfigs.length > 0) {
-            confirmMsg += `\nWarning: unmatched config file${preview.orphanConfigs.length !== 1 ? 's' : ''}: ${preview.orphanConfigs.join(', ')}\n`;
-          }
-          confirmMsg += '\nSave Project will update configs in this folder.';
-
-          if (!window.confirm(confirmMsg)) {
-            projectDirHandleRef.current = null;
-            setProjectStatus({ ok: null, text: 'Import cancelled.' });
-            return;
-          }
-
           setProjectStatus({ ok: null, text: 'Loading project files…' });
           const loadResult = await loadProjectFromDir(handle);
           if (!loadResult.ok) {

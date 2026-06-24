@@ -1,24 +1,24 @@
 import { useState, useEffect, useRef } from 'react';
 import { GeneratedTrajectory, TrajGroup, TrajGenParams } from '../types';
-import { Trash2, Download, Upload, Plus, RefreshCw, Copy, ChevronUp, ChevronDown, XCircle, X } from 'lucide-react';
-import { simulateLanding, simulateImpactAngle, refineTrajectory, refineGroupTrajectories, exportTrajectoriesToFolder } from '../simulation';
+import { Trash2, Download, Upload, RefreshCw, Copy, ChevronUp, ChevronDown, XCircle, X } from 'lucide-react';
 import {
-  panelAside, panelSectionTitle, panelLabel, panelInput, panelBtnPrimary,
-  panelEmpty, panelHint, panelMeta, panelMono, panelContent,
+  simulateLanding, simulateImpactAngle, refineTrajectory, downloadTrajectoriesArchive,
+  REFINE_MAX_ITER, REFINE_THRESHOLD_M,
+} from '../simulation';
+import {
+  panelAside, panelSectionTitle, panelBtnPrimary,
+  panelEmpty, panelHint, panelMeta, panelMono,
 } from './panelStyles';
 
 interface Props {
   groups: TrajGroup[];
   selectedGroupId: string | null;
-  selectedTrajId: string | null;
   hoveredTrajId: string | null;
   onSelectGroup: (id: string) => void;
-  onSelectTraj: (id: string) => void;
   onHoverTraj: (id: string | null) => void;
   onDeleteTraj: (groupId: string, trajId: string) => void;
   onDeleteGroup: (groupId: string) => void;
   onUpdateGroup: (groupId: string, trajs: GeneratedTrajectory[]) => void;
-  onBatchUpdateGroups: (updates: { groupId: string; trajectories: GeneratedTrajectory[] }[]) => void;
   onImportGroup: (group: TrajGroup) => void;
   onClearAll: () => void;
   params: TrajGenParams;
@@ -26,47 +26,11 @@ interface Props {
 }
 
 type SortKey = 'exitVelocity' | 'exitAngle' | 'impactAngle' | 'timeOfFlight' | 'landingError';
-type ConstMode = 'velocity' | 'angle';
-
-function FreeNumInput({ value, min, max, onChange, className }: {
-  value: number; min?: number; max?: number;
-  onChange: (v: number) => void; className?: string;
-}) {
-  const [raw, setRaw] = useState(String(value));
-  const [focused, setFocused] = useState(false);
-
-  useEffect(() => {
-    if (!focused) setRaw(String(value));
-  }, [value, focused]);
-
-  function commit(str: string) {
-    const stripped = str.replace(/[^0-9.\-]/g, '');
-    let n = parseFloat(stripped);
-    if (isNaN(n)) n = min ?? 0;
-    if (min !== undefined) n = Math.max(min, n);
-    if (max !== undefined) n = Math.min(max, n);
-    setRaw(String(n));
-    onChange(n);
-  }
-
-  return (
-    <input
-      type="text"
-      inputMode="decimal"
-      value={raw}
-      onChange={(e) => setRaw(e.target.value)}
-      onFocus={() => setFocused(true)}
-      onBlur={(e) => { setFocused(false); commit(e.target.value); }}
-      onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
-      className={className}
-    />
-  );
-}
 
 export default function TrajectoryGenRight({
-  groups, selectedGroupId, selectedTrajId, hoveredTrajId,
-  onSelectGroup, onSelectTraj, onHoverTraj,
-  onDeleteTraj, onDeleteGroup, onUpdateGroup, onBatchUpdateGroups, onImportGroup, onClearAll,
+  groups, selectedGroupId, hoveredTrajId,
+  onSelectGroup, onHoverTraj,
+  onDeleteTraj, onDeleteGroup, onUpdateGroup, onImportGroup, onClearAll,
   params, width
 }: Props) {
   const group = groups.find(g => g.id === selectedGroupId) ?? groups[0] ?? null;
@@ -74,18 +38,8 @@ export default function TrajectoryGenRight({
   const drag = group?.drag ?? params.dragCoefficient;
   const magnus = group?.magnus ?? params.magnusGain;
 
-  const [refineMaxIter, setRefineMaxIter] = useState(200);
-  const [refineThreshold, setRefineThreshold] = useState(0.001);
-  const [constMode, setConstMode] = useState<ConstMode>('angle');
-  const [refining, setRefining] = useState(false);
-  const [manualVel, setManualVel] = useState(8);
-  const [manualAngle, setManualAngle] = useState(45);
-  const [downloadName, setDownloadName] = useState('trajectories');
   const [sortKey, setSortKey] = useState<SortKey>('exitAngle');
   const [sortAsc, setSortAsc] = useState(true);
-  const [splitPct, setSplitPct] = useState(45);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const draggingRef = useRef(false);
   const [activeCell, setActiveCell] = useState<{ id: string; field: 'exitVelocity' | 'exitAngle' } | null>(null);
   const [cellRaw, setCellRaw] = useState('');
   const cellRef = useRef<HTMLInputElement>(null);
@@ -94,9 +48,6 @@ export default function TrajectoryGenRight({
   const committingRef = useRef(false);
   const importInputRef = useRef<HTMLInputElement>(null);
   const [importError, setImportError] = useState<string | null>(null);
-  const [exporting, setExporting] = useState(false);
-  const [exportMessage, setExportMessage] = useState<{ ok: boolean; text: string } | null>(null);
-  const exportingRef = useRef(false);
 
   useEffect(() => { activeCellRef.current = activeCell; }, [activeCell]);
   useEffect(() => { cellRawRef.current = cellRaw; }, [cellRaw]);
@@ -107,29 +58,38 @@ export default function TrajectoryGenRight({
     }
   }, [activeCell?.id, activeCell?.field]);
 
-  // Stable refs for keybinds
-  const selectedTrajIdRef = useRef(selectedTrajId);
+  const hoveredTrajIdRef = useRef(hoveredTrajId);
   const trajectoriesRef = useRef(trajectories);
   const groupRef = useRef(group);
   const paramsRef = useRef(params);
   const dragRef = useRef(drag);
   const magnusRef = useRef(magnus);
-  const refineMaxIterRef = useRef(refineMaxIter);
-  const refineThresholdRef = useRef(refineThreshold);
-  const constModeRef = useRef(constMode);
-  useEffect(() => { selectedTrajIdRef.current = selectedTrajId; }, [selectedTrajId]);
+  useEffect(() => { hoveredTrajIdRef.current = hoveredTrajId; }, [hoveredTrajId]);
   useEffect(() => { trajectoriesRef.current = trajectories; }, [trajectories]);
   useEffect(() => { groupRef.current = group; }, [group]);
   useEffect(() => { paramsRef.current = params; }, [params]);
   useEffect(() => { dragRef.current = drag; }, [drag]);
   useEffect(() => { magnusRef.current = magnus; }, [magnus]);
-  useEffect(() => { refineMaxIterRef.current = refineMaxIter; }, [refineMaxIter]);
-  useEffect(() => { refineThresholdRef.current = refineThreshold; }, [refineThreshold]);
-  useEffect(() => { constModeRef.current = constMode; }, [constMode]);
+
+  function applyRefineResult(
+    traj: GeneratedTrajectory,
+    result: ReturnType<typeof refineTrajectory>,
+    dx: number,
+    dy: number,
+    errorTolerance: number
+  ): GeneratedTrajectory {
+    const t = result.trajectory;
+    const impact = simulateImpactAngle(t.exitVelocity, t.exitAngle, dragRef.current, magnusRef.current, dx);
+    const withImpact = { ...t, impactAngle: impact !== null ? Math.round(impact * 100) / 100 : t.impactAngle };
+    if (!result.successfulBracket) return withImpact;
+    const landing = simulateLanding(t.exitVelocity, t.exitAngle, dragRef.current, magnusRef.current, dy);
+    const inGoal = landing !== null && Math.abs(landing.landingX - dx) <= errorTolerance / 2;
+    return { ...withImpact, successfulBracket: inGoal, accurate: result.accurate && inGoal };
+  }
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
-      const id = selectedTrajIdRef.current;
+      const id = hoveredTrajIdRef.current;
       const g = groupRef.current;
       if (!id || !g) return;
       const tag = (e.target as HTMLElement).tagName;
@@ -143,6 +103,7 @@ export default function TrajectoryGenRight({
           id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
           successfulBracket: undefined,
           accurate: undefined,
+          refineFailure: undefined,
         };
         onUpdateGroup(g.id, [...trajectoriesRef.current, copy]);
       }
@@ -151,49 +112,15 @@ export default function TrajectoryGenRight({
         const traj = trajectoriesRef.current.find(t => t.id === id);
         if (!traj) return;
         const p = paramsRef.current;
-        const d = dragRef.current;
-        const m = magnusRef.current;
-        const dx = g.dx;
-        const dy = g.dy;
-        const gParams = { ...p, dx, dy };
-        const result = refineTrajectory(traj, gParams, d, m, refineMaxIterRef.current, refineThresholdRef.current, constModeRef.current);
-        const t = result.trajectory;
-        const impact = simulateImpactAngle(t.exitVelocity, t.exitAngle, d, m, dx);
-        const withImpact = { ...t, impactAngle: impact !== null ? Math.round(impact * 100) / 100 : t.impactAngle };
-        let refined: GeneratedTrajectory;
-        if (!result.successfulBracket) {
-          refined = withImpact;
-        } else {
-          const landing = simulateLanding(t.exitVelocity, t.exitAngle, d, m, dy);
-          const inGoal = landing !== null && Math.abs(landing.landingX - dx) <= p.errorTolerance / 2;
-          refined = { ...withImpact, successfulBracket: inGoal, accurate: result.accurate };
-        }
+        const gParams = { ...p, dx: g.dx, dy: g.dy };
+        const result = refineTrajectory(traj, gParams, dragRef.current, magnusRef.current, REFINE_MAX_ITER, REFINE_THRESHOLD_M, 'angle');
+        const refined = applyRefineResult(traj, result, g.dx, g.dy, p.errorTolerance);
         onUpdateGroup(g.id, trajectoriesRef.current.map(tr => tr.id === id ? refined : tr));
       }
     }
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  function handleDividerMouseDown(e: React.MouseEvent) {
-    e.preventDefault();
-    draggingRef.current = true;
-    const container = containerRef.current;
-    if (!container) return;
-    function onMove(ev: MouseEvent) {
-      if (!draggingRef.current || !container) return;
-      const rect = container.getBoundingClientRect();
-      const pct = ((ev.clientY - rect.top) / rect.height) * 100;
-      setSplitPct(Math.min(85, Math.max(15, pct)));
-    }
-    function onUp() {
-      draggingRef.current = false;
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    }
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-  }
+  }, [onUpdateGroup]);
 
   function handleSort(key: SortKey) {
     if (sortKey === key) setSortAsc(v => !v);
@@ -243,41 +170,6 @@ export default function TrajectoryGenRight({
     return sortAsc ? diff : -diff;
   });
 
-  function handleRefine() {
-    const groupsWithTrajs = groups.filter((g) => g.trajectories.length > 0);
-    if (groupsWithTrajs.length === 0) return;
-    setRefining(true);
-    setTimeout(() => {
-      const updates = groupsWithTrajs.map((g) => ({
-        groupId: g.id,
-        trajectories: refineGroupTrajectories(
-          g,
-          params,
-          refineMaxIter,
-          refineThreshold,
-          constMode
-        ),
-      }));
-      onBatchUpdateGroups(updates);
-      setRefining(false);
-    }, 0);
-  }
-
-  function handleAddManual() {
-    if (!group) return;
-    const landing = simulateLanding(manualVel, manualAngle, drag, magnus, group.dy);
-    const impact = simulateImpactAngle(manualVel, manualAngle, drag, magnus, group.dx);
-    const newTraj: GeneratedTrajectory = {
-      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      exitVelocity: manualVel,
-      exitAngle: manualAngle,
-      impactAngle: impact !== null ? Math.round(impact * 100) / 100 : 0,
-      timeOfFlight: landing ? landing.timeOfFlight : 0,
-      landingX: group.dx,
-    };
-    onUpdateGroup(group.id, [...trajectories, newTraj]);
-  }
-
   function handleCopy(id: string) {
     if (!group) return;
     const traj = trajectories.find(t => t.id === id);
@@ -287,6 +179,7 @@ export default function TrajectoryGenRight({
       id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
       successfulBracket: undefined,
       accurate: undefined,
+      refineFailure: undefined,
     };
     onUpdateGroup(group.id, [...trajectories, copy]);
   }
@@ -296,46 +189,13 @@ export default function TrajectoryGenRight({
     const traj = trajectories.find(t => t.id === id);
     if (!traj) return;
     const gParams = { ...params, dx: group.dx, dy: group.dy };
-    const result = refineTrajectory(traj, gParams, drag, magnus, refineMaxIter, refineThreshold, constMode);
-    const t = result.trajectory;
-    const impact = simulateImpactAngle(t.exitVelocity, t.exitAngle, drag, magnus, group.dx);
-    const withImpact = { ...t, impactAngle: impact !== null ? Math.round(impact * 100) / 100 : t.impactAngle };
-    let refined: GeneratedTrajectory;
-    if (!result.successfulBracket) {
-      refined = withImpact;
-    } else {
-      const landing = simulateLanding(t.exitVelocity, t.exitAngle, drag, magnus, group.dy);
-      const inGoal = landing !== null && Math.abs(landing.landingX - group.dx) <= params.errorTolerance / 2;
-      refined = { ...withImpact, successfulBracket: inGoal, accurate: result.accurate };
-    }
+    const result = refineTrajectory(traj, gParams, drag, magnus, REFINE_MAX_ITER, REFINE_THRESHOLD_M, 'angle');
+    const refined = applyRefineResult(traj, result, group.dx, group.dy, params.errorTolerance);
     onUpdateGroup(group.id, trajectories.map(tr => tr.id === id ? refined : tr));
   }
 
-  async function handleDownload() {
-    if (exportingRef.current) return;
-    exportingRef.current = true;
-    setExporting(true);
-    setExportMessage(null);
-
-    try {
-      const result = await exportTrajectoriesToFolder(groups, downloadName);
-      if (result.ok) {
-        setExportMessage({
-          ok: true,
-          text: `Exported ${result.count} file${result.count === 1 ? '' : 's'} to the selected folder.`,
-        });
-      } else if (!result.cancelled) {
-        setExportMessage({ ok: false, text: result.message });
-      }
-    } catch (err) {
-      setExportMessage({
-        ok: false,
-        text: `Export failed: ${(err as Error).message}`,
-      });
-    } finally {
-      exportingRef.current = false;
-      setExporting(false);
-    }
+  function handleDownload() {
+    downloadTrajectoriesArchive(groups, params);
   }
 
   function handleImportFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -388,12 +248,6 @@ export default function TrajectoryGenRight({
     return sortAsc ? <ChevronUp size={10} className="inline ml-0.5" /> : <ChevronDown size={10} className="inline ml-0.5" />;
   }
 
-  const constModeOptions: { value: ConstMode; label: string }[] = [
-    { value: 'angle', label: 'Angle' },
-    { value: 'velocity', label: 'Speed' },
-  ];
-
-  // Tab label: (dx, dy) both to 3 dp
   function tabLabel(g: TrajGroup) {
     return `(${g.dx.toFixed(3)}, ${g.dy.toFixed(3)})`;
   }
@@ -401,7 +255,7 @@ export default function TrajectoryGenRight({
   const totalTrajectoryCount = groups.reduce((sum, g) => sum + g.trajectories.length, 0);
 
   return (
-    <aside ref={containerRef} className={`${panelAside} border-l border-gray-700`} style={{ width }}>
+    <aside className={`${panelAside} border-l border-gray-700`} style={{ width }}>
 
       {/* Group tabs */}
       <div className="flex-shrink-0 border-b border-gray-700 overflow-x-auto">
@@ -461,67 +315,61 @@ export default function TrajectoryGenRight({
         </div>
       )}
 
-      {/* Table header */}
-      {group && (
-        <div className={`flex-shrink-0 flex items-center gap-1 px-3 py-2 bg-gray-800/50 text-sm font-medium text-gray-500 border-b border-gray-700/60 select-none`}>
-          <button className="flex-1 text-left hover:text-gray-300 transition-colors" onClick={() => handleSort('exitVelocity')}>
-            Spd <SortIcon k="exitVelocity" />
-          </button>
-          <button className="flex-1 text-left hover:text-gray-300 transition-colors" onClick={() => handleSort('exitAngle')}>
-            Exit <SortIcon k="exitAngle" />
-          </button>
-          <button className="flex-1 text-left hover:text-gray-300 transition-colors" onClick={() => handleSort('impactAngle')}>
-            Impact <SortIcon k="impactAngle" />
-          </button>
-          <button className="flex-1 text-left hover:text-gray-300 transition-colors" onClick={() => handleSort('timeOfFlight')}>
-            ToF <SortIcon k="timeOfFlight" />
-          </button>
-          <button className="flex-1 text-left hover:text-gray-300 transition-colors" onClick={() => handleSort('landingError')}>
-            Err <SortIcon k="landingError" />
-          </button>
-          <div className="w-16" />
-        </div>
-      )}
-
-      {/* Trajectory list */}
       {group ? (
-        <div className="overflow-y-auto min-h-0" style={{ height: `calc(${splitPct}% - 56px)` }}>
-          {sorted.length === 0 ? (
-            <div className={`flex flex-col items-center justify-center h-full text-gray-600 ${panelEmpty} px-4`}>
-              <p>No trajectories in this group.</p>
-            </div>
-          ) : (
-            sorted.map(traj => {
-              const isSelected = selectedTrajId === traj.id;
+        <div className="flex flex-col flex-1 min-h-0">
+          {/* Table header */}
+          <div className={`flex-shrink-0 flex items-center gap-1 px-3 py-2 bg-gray-800/50 text-sm font-medium text-gray-500 border-b border-gray-700/60 select-none`}>
+            <button className="flex-1 text-left hover:text-gray-300 transition-colors" onClick={() => handleSort('exitVelocity')}>
+              Spd <SortIcon k="exitVelocity" />
+            </button>
+            <button className="flex-1 text-left hover:text-gray-300 transition-colors" onClick={() => handleSort('exitAngle')}>
+              Exit <SortIcon k="exitAngle" />
+            </button>
+            <button className="flex-1 text-left hover:text-gray-300 transition-colors" onClick={() => handleSort('impactAngle')}>
+              Impact <SortIcon k="impactAngle" />
+            </button>
+            <button className="flex-1 text-left hover:text-gray-300 transition-colors" onClick={() => handleSort('timeOfFlight')}>
+              ToF <SortIcon k="timeOfFlight" />
+            </button>
+            <button className="flex-1 text-left hover:text-gray-300 transition-colors" onClick={() => handleSort('landingError')}>
+              Err <SortIcon k="landingError" />
+            </button>
+            <div className="w-16" />
+          </div>
+
+          {/* Trajectory list — fills remaining panel height above bottom controls */}
+          <div className="overflow-y-auto flex-1 min-h-0">
+            {sorted.length === 0 ? (
+              <div className={`flex flex-col items-center justify-center h-full text-gray-600 ${panelEmpty} px-4`}>
+                <p>No trajectories in this group.</p>
+              </div>
+            ) : (
+              sorted.map(traj => {
               const isHovered = hoveredTrajId === traj.id;
-              const highlighted = isSelected || isHovered;
               const activeVel = activeCell?.id === traj.id && activeCell.field === 'exitVelocity';
               const activeAngle = activeCell?.id === traj.id && activeCell.field === 'exitAngle';
 
               const wasRefined = traj.successfulBracket !== undefined;
               const isInvalid = wasRefined && (traj.successfulBracket === false || traj.accurate === false);
               const invalidReason = !wasRefined ? null
-                : traj.successfulBracket === false ? 'No bracketing interval found'
+                : traj.refineFailure === 'target_height' ? 'Failed to reach target height'
+                : traj.refineFailure === 'bracket' ? 'No bracketing interval found'
                 : traj.accurate === false ? 'Landing error exceeds accuracy threshold'
+                : traj.successfulBracket === false ? 'No bracketing interval found'
                 : null;
 
               return (
                 <div
                   key={traj.id}
-                  onClick={() => { if (!activeCell) onSelectTraj(traj.id); }}
                   onMouseEnter={() => onHoverTraj(traj.id)}
                   onMouseLeave={() => onHoverTraj(null)}
-                  className={`relative flex items-center gap-1 px-3 py-2 cursor-pointer border-b transition-colors text-sm group ${
+                  className={`relative flex items-center gap-1 px-3 py-2 border-b transition-colors text-sm group ${
                     isInvalid
-                      ? isSelected
-                        ? 'bg-red-900/40 border-b-red-900/60 border-l-2 border-l-red-400'
-                        : isHovered
-                        ? 'bg-red-900/30 border-b-red-900/60 border-l-2 border-l-red-500/60'
+                      ? isHovered
+                        ? 'bg-red-900/35 border-b-red-900/60 border-l-2 border-l-red-400'
                         : 'bg-red-950/20 border-b-red-900/40 hover:bg-red-900/25'
-                      : isSelected
-                      ? 'bg-yellow-900/30 border-b-gray-800 border-l-2 border-l-yellow-400'
                       : isHovered
-                      ? 'bg-yellow-900/20 border-b-gray-800 border-l-2 border-l-yellow-500/60'
+                      ? 'bg-blue-900/40 border-b-gray-800 border-l-2 border-l-blue-400'
                       : 'border-b-gray-800 hover:bg-gray-800/50'
                   }`}
                 >
@@ -548,7 +396,7 @@ export default function TrajectoryGenRight({
                   ) : (
                     <span
                       className={`flex-1 font-mono cursor-text select-none ${
-                        isInvalid ? (highlighted ? 'text-red-300' : 'text-red-400') : (highlighted ? 'text-yellow-200' : 'text-white')
+                        isInvalid ? (isHovered ? 'text-red-300' : 'text-red-400') : (isHovered ? 'text-blue-200' : 'text-white')
                       }`}
                       onDoubleClick={e => { e.stopPropagation(); openCell(traj.id, 'exitVelocity', traj.exitVelocity); }}
                     >
@@ -573,7 +421,7 @@ export default function TrajectoryGenRight({
                   ) : (
                     <span
                       className={`flex-1 font-mono cursor-text select-none ${
-                        isInvalid ? (highlighted ? 'text-red-400' : 'text-red-500') : (highlighted ? 'text-yellow-300' : 'text-gray-300')
+                        isInvalid ? (isHovered ? 'text-red-300' : 'text-red-500') : (isHovered ? 'text-blue-200' : 'text-gray-300')
                       }`}
                       onDoubleClick={e => { e.stopPropagation(); openCell(traj.id, 'exitAngle', traj.exitAngle); }}
                     >
@@ -581,21 +429,21 @@ export default function TrajectoryGenRight({
                     </span>
                   )}
                   <span className={`flex-1 font-mono ${
-                    isInvalid ? (highlighted ? 'text-red-400' : 'text-red-500') : (highlighted ? 'text-yellow-300' : 'text-gray-300')
+                    isInvalid ? (isHovered ? 'text-red-300' : 'text-red-500') : (isHovered ? 'text-blue-200' : 'text-gray-300')
                   }`}>{traj.impactAngle.toFixed(2)}°</span>
                   <span className={`flex-1 font-mono ${
-                    isInvalid ? (highlighted ? 'text-red-400' : 'text-red-600') : (highlighted ? 'text-yellow-400' : 'text-gray-400')
+                    isInvalid ? (isHovered ? 'text-red-300' : 'text-red-600') : (isHovered ? 'text-blue-300' : 'text-gray-400')
                   }`}>{traj.timeOfFlight.toFixed(3)}s</span>
                   <span className={`flex-1 font-mono ${
                     traj.landingError === null
                       ? 'text-gray-600'
                       : isInvalid
-                      ? (highlighted ? 'text-red-400' : 'text-red-600')
+                      ? (isHovered ? 'text-red-300' : 'text-red-600')
                       : traj.landingError > 0
-                      ? (highlighted ? 'text-orange-300' : 'text-orange-400')
+                      ? (isHovered ? 'text-orange-300' : 'text-orange-400')
                       : traj.landingError < 0
-                      ? (highlighted ? 'text-sky-300' : 'text-sky-400')
-                      : (highlighted ? 'text-green-300' : 'text-green-400')
+                      ? (isHovered ? 'text-sky-300' : 'text-sky-400')
+                      : (isHovered ? 'text-green-300' : 'text-green-400')
                   }`}>
                     {traj.landingError === null ? '—' : `${traj.landingError > 0 ? '+' : ''}${traj.landingError.toFixed(2)}mm`}
                   </span>
@@ -626,105 +474,10 @@ export default function TrajectoryGenRight({
               );
             })
           )}
-        </div>
-      ) : (
-        <div className={`flex-1 flex items-center justify-center text-gray-600 ${panelEmpty} px-4`}>
-          <p>Generate trajectories to get started.</p>
-        </div>
-      )}
-
-      {group && (
-        <>
-          {/* Draggable divider */}
-          <div
-            onMouseDown={handleDividerMouseDown}
-            className="flex-shrink-0 h-1.5 bg-gray-700 hover:bg-blue-500 active:bg-blue-400 cursor-row-resize transition-colors group relative"
-            title="Drag to resize"
-          >
-            <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 flex justify-center gap-0.5 pointer-events-none">
-              <span className="w-4 h-px bg-gray-500 group-hover:bg-blue-300 transition-colors" />
-              <span className="w-4 h-px bg-gray-500 group-hover:bg-blue-300 transition-colors" />
-            </div>
           </div>
 
-          {/* Bottom controls */}
-          <div className={`${panelContent} min-h-0`}>
-
-            {/* Manual add */}
-            <div className="space-y-2">
-              <h3 className={panelSectionTitle}>Add Manually</h3>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className={panelLabel}>Speed (m/s)</label>
-                  <FreeNumInput value={manualVel} step={0.1} min={0}
-                    onChange={(v) => setManualVel(v)}
-                    className={panelInput} />
-                </div>
-                <div>
-                  <label className={panelLabel}>Angle (deg)</label>
-                  <FreeNumInput value={manualAngle} step={0.5}
-                    onChange={(v) => setManualAngle(v)}
-                    className={panelInput} />
-                </div>
-              </div>
-              <button
-                onClick={handleAddManual}
-                className={`w-full ${panelBtnPrimary} bg-gray-700 hover:bg-gray-600 text-white`}
-              >
-                <Plus size={14} />
-                Add Trajectory
-              </button>
-            </div>
-
-            {/* Refine all */}
-            <div className="space-y-2">
-              <h3 className={panelSectionTitle}>Refine All Trajectories</h3>
-              <div>
-                <label className={panelLabel}>Keep Constant</label>
-                <div className="flex rounded-md overflow-hidden border border-gray-700">
-                  {constModeOptions.map(opt => (
-                    <button
-                      key={opt.value}
-                      onClick={() => setConstMode(opt.value)}
-                      className={`flex-1 text-sm py-2 transition-colors ${
-                        constMode === opt.value
-                          ? 'bg-blue-600 text-white'
-                          : 'bg-gray-800 text-gray-400 hover:text-gray-200 hover:bg-gray-700'
-                      }`}
-                    >
-                      {opt.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className={panelLabel}>Max Iterations</label>
-                  <FreeNumInput value={refineMaxIter} min={1} step={50}
-                    onChange={(v) => setRefineMaxIter(Math.max(1, Math.round(v)))}
-                    className={panelInput} />
-                </div>
-                <div>
-                  <label className={panelLabel}>Threshold (m)</label>
-                  <FreeNumInput value={refineThreshold} min={0.0001} step={0.0001}
-                    onChange={(v) => setRefineThreshold(Math.max(0.0001, v))}
-                    className={panelInput} />
-                </div>
-              </div>
-              <button
-                onClick={handleRefine}
-                disabled={refining || totalTrajectoryCount === 0}
-                className={`w-full ${panelBtnPrimary} ${
-                  refining || totalTrajectoryCount === 0
-                    ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
-                    : 'bg-amber-600 hover:bg-amber-500 text-white'
-                }`}
-              >
-                <RefreshCw size={14} className={refining ? 'animate-spin' : ''} />
-                {refining ? 'Refining...' : 'Refine All Trajectories'}
-              </button>
-            </div>
-
+          {/* Bottom controls — natural height only, scrolls if panel is very short */}
+          <div className="flex-shrink-0 p-4 space-y-4 border-t border-gray-700">
             {/* Manage */}
             <div className="space-y-2">
               <h3 className={panelSectionTitle}>Manage</h3>
@@ -762,41 +515,26 @@ export default function TrajectoryGenRight({
               {importError && (
                 <p className="text-sm text-red-400">{importError}</p>
               )}
-              <div>
-                <label className={panelLabel}>Export File Name</label>
-                <input
-                  type="text"
-                  value={downloadName}
-                  onChange={e => setDownloadName(e.target.value)}
-                  className={panelInput}
-                  placeholder="trajectories"
-                />
-              </div>
               <button
                 type="button"
                 onClick={handleDownload}
-                disabled={totalTrajectoryCount === 0 || exporting}
+                disabled={totalTrajectoryCount === 0}
                 className={`w-full ${panelBtnPrimary} ${
-                  totalTrajectoryCount === 0 || exporting
+                  totalTrajectoryCount === 0
                     ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
                     : 'bg-green-700 hover:bg-green-600 text-white'
                 }`}
               >
-                <Download size={14} className={exporting ? 'animate-pulse' : ''} />
-                {exporting ? 'Exporting...' : 'Download All Trajectories'}
+                <Download size={14} />
+                Download All Trajectories
               </button>
-              {exportMessage && (
-                <p className={`text-sm leading-snug ${exportMessage.ok ? 'text-green-400' : 'text-red-400'}`}>
-                  {exportMessage.text}
-                </p>
-              )}
-              <p className={panelHint}>
-                Exports one JSON per goal tab as{' '}
-                <span className={`${panelMono} text-gray-400`}>name (dx, dy).json</span>
-              </p>
             </div>
           </div>
-        </>
+        </div>
+      ) : (
+        <div className={`flex-1 flex items-center justify-center text-gray-600 ${panelEmpty} px-4`}>
+          <p>Generate trajectories to get started.</p>
+        </div>
       )}
     </aside>
   );

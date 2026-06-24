@@ -1,13 +1,13 @@
-import { useEffect, useRef, useCallback } from 'react';
-import { TrajGenParams, TrajGroup } from '../types';
+import { useEffect, useRef, useCallback, useState } from 'react';
+import { TrajGenParams, TrajGroup, GeneratedTrajectory } from '../types';
 import { simulateShot, SIM_MAX_TIME, SIM_DT } from '../simulation';
 
 interface Props {
   params: TrajGenParams;
   groups: TrajGroup[];
   selectedGroupId: string | null;
-  selectedId: string | null;
   hoveredId: string | null;
+  onHoverTraj: (id: string | null) => void;
 }
 
 interface View {
@@ -16,12 +16,58 @@ interface View {
   zoom: number;
 }
 
-const INIT_ZOOM = 80;
+interface HitPolyline {
+  id: string;
+  points: [number, number][];
+  traj: GeneratedTrajectory;
+}
 
-export default function TrajectoryGenCanvas({ params, groups, selectedGroupId, selectedId, hoveredId }: Props) {
+interface CanvasTooltip {
+  x: number;
+  y: number;
+  exitVelocity: number;
+  exitAngle: number;
+  timeOfFlight: number;
+}
+
+const INIT_ZOOM = 80;
+const HIT_THRESHOLD_PX = 8;
+const TRAJ_COLOR = 'rgba(59,130,246,0.3)';
+const TRAJ_HOVER_COLOR = '#93c5fd';
+
+function distToSegment(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) return Math.hypot(px - x1, py - y1);
+  let t = ((px - x1) * dx + (py - y1) * dy) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+}
+
+function hitTestPolylines(polylines: HitPolyline[], mx: number, my: number): HitPolyline | null {
+  let best: HitPolyline | null = null;
+  let bestDist = HIT_THRESHOLD_PX;
+  for (const poly of polylines) {
+    const pts = poly.points;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const d = distToSegment(mx, my, pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1]);
+      if (d < bestDist) {
+        bestDist = d;
+        best = poly;
+      }
+    }
+  }
+  return best;
+}
+
+export default function TrajectoryGenCanvas({ params, groups, selectedGroupId, hoveredId, onHoverTraj }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<View>({ panX: -1, panY: -2, zoom: INIT_ZOOM });
   const draggingRef = useRef<{ lastX: number; lastY: number } | null>(null);
+  const hitPolylinesRef = useRef<HitPolyline[]>([]);
+  const [tooltip, setTooltip] = useState<CanvasTooltip | null>(null);
 
   function worldToCanvas(wx: number, wy: number, view: View, cssH: number): [number, number] {
     const sx = (wx - view.panX) * view.zoom;
@@ -81,7 +127,6 @@ export default function TrajectoryGenCanvas({ params, groups, selectedGroupId, s
     if (finePxGap >= minPxGap) drawGridLines(fineSpacing, 0.04);
     drawGridLines(coarseSpacing, 0.10);
 
-    // Ground line
     const [, groundY] = toS(0, 0);
     ctx.strokeStyle = 'rgba(255,255,255,0.12)';
     ctx.lineWidth = 1;
@@ -89,7 +134,6 @@ export default function TrajectoryGenCanvas({ params, groups, selectedGroupId, s
     ctx.beginPath(); ctx.moveTo(0, groundY); ctx.lineTo(cssW, groundY); ctx.stroke();
     ctx.setLineDash([]);
 
-    // Compute all dx values from slider
     const dxValues: number[] = [];
     let dxCursor = params.dxMin;
     while (dxCursor <= params.dxMax + 1e-9) {
@@ -99,7 +143,6 @@ export default function TrajectoryGenCanvas({ params, groups, selectedGroupId, s
 
     const selectedGroup = groups.find(g => g.id === selectedGroupId) ?? null;
 
-    // Draw ghost dx/dy lines and ghost goals for all dx values
     for (const dx of dxValues) {
       const isSelected = selectedGroup ? Math.abs(selectedGroup.dx - dx) < 1e-6 : false;
       const [rx] = toS(0, 0);
@@ -124,7 +167,6 @@ export default function TrajectoryGenCanvas({ params, groups, selectedGroupId, s
       ctx.setLineDash([]);
     }
 
-    // Draw ghost goals for non-selected dx values
     for (const dx of dxValues) {
       const isSelected = selectedGroup ? Math.abs(selectedGroup.dx - dx) < 1e-6 : false;
       if (isSelected) continue;
@@ -147,7 +189,6 @@ export default function TrajectoryGenCanvas({ params, groups, selectedGroupId, s
       ctx.lineCap = 'butt';
     }
 
-    // Draw dx label for selected group
     if (selectedGroup) {
       const [midSx] = toS(selectedGroup.dx / 2, 0);
       ctx.fillStyle = 'rgba(156,163,175,0.6)';
@@ -165,7 +206,6 @@ export default function TrajectoryGenCanvas({ params, groups, selectedGroupId, s
         ctx.fillText(`dy = ${params.dy > 0 ? '+' : ''}${params.dy.toFixed(2)} m`, gxGoal - 8, (gyGoal + groundY) / 2);
       }
     } else if (dxValues.length > 0) {
-      // No groups yet — draw labels from slider params
       const dx0 = dxValues[0];
       const [midSx] = toS(dx0 / 2, 0);
       ctx.fillStyle = 'rgba(156,163,175,0.4)';
@@ -175,48 +215,45 @@ export default function TrajectoryGenCanvas({ params, groups, selectedGroupId, s
       ctx.fillText(`dx range: ${params.dxMin.toFixed(2)}–${params.dxMax.toFixed(2)} m`, midSx, groundY + 5);
     }
 
-    // Draw trajectories for selected group only
     const activeTraj = selectedGroup ? selectedGroup.trajectories : [];
     const activeDrag = selectedGroup ? selectedGroup.drag : params.dragCoefficient;
     const activeMagnus = selectedGroup ? selectedGroup.magnus : params.magnusGain;
     const activeMagnusPower = params.magnusPower ?? 2;
 
-    const highlighted = new Set([selectedId, hoveredId].filter(Boolean) as string[]);
+    const polylines: HitPolyline[] = [];
 
-    for (const traj of activeTraj) {
-      if (highlighted.has(traj.id)) continue;
-      const pts = simulateShot(traj.exitVelocity, traj.exitAngle, activeDrag, activeMagnus, SIM_MAX_TIME, SIM_DT, activeMagnusPower);
+    function drawTraj(traj: GeneratedTrajectory, strokeStyle: string, lineWidth: number) {
+      const simPts = simulateShot(traj.exitVelocity, traj.exitAngle, activeDrag, activeMagnus, SIM_MAX_TIME, SIM_DT, activeMagnusPower);
+      const screenPts: [number, number][] = [];
       ctx.beginPath();
       let started = false;
-      for (const p of pts) {
+      for (const p of simPts) {
         const [sx, sy] = toS(p.x, p.y);
+        screenPts.push([sx, sy]);
         if (!started) { ctx.moveTo(sx, sy); started = true; }
         else ctx.lineTo(sx, sy);
         if (p.x > worldXMax + 1) break;
       }
-      ctx.strokeStyle = 'rgba(59,130,246,0.3)';
-      ctx.lineWidth = 1;
+      ctx.strokeStyle = strokeStyle;
+      ctx.lineWidth = lineWidth;
       ctx.stroke();
+      if (screenPts.length >= 2) {
+        polylines.push({ id: traj.id, points: screenPts, traj });
+      }
     }
 
     for (const traj of activeTraj) {
-      if (!highlighted.has(traj.id)) continue;
-      const isSelected = traj.id === selectedId;
-      const pts = simulateShot(traj.exitVelocity, traj.exitAngle, activeDrag, activeMagnus, SIM_MAX_TIME, SIM_DT, activeMagnusPower);
-      ctx.beginPath();
-      let started = false;
-      for (const p of pts) {
-        const [sx, sy] = toS(p.x, p.y);
-        if (!started) { ctx.moveTo(sx, sy); started = true; }
-        else ctx.lineTo(sx, sy);
-        if (p.x > worldXMax + 1) break;
-      }
-      ctx.strokeStyle = isSelected ? 'rgba(251,191,36,0.95)' : 'rgba(253,224,71,0.6)';
-      ctx.lineWidth = isSelected ? 2.5 : 1.5;
-      ctx.stroke();
+      if (traj.id === hoveredId) continue;
+      drawTraj(traj, TRAJ_COLOR, 1);
     }
 
-    // Active goal (selected group dx/dy, or fallback to first dxValue)
+    if (hoveredId) {
+      const hovered = activeTraj.find(t => t.id === hoveredId);
+      if (hovered) drawTraj(hovered, TRAJ_HOVER_COLOR, 2);
+    }
+
+    hitPolylinesRef.current = polylines;
+
     const activeDx = selectedGroup ? selectedGroup.dx : (dxValues[0] ?? params.dxMin);
     const activeDy = params.dy;
     const halfGoal = params.errorTolerance / 2;
@@ -244,7 +281,6 @@ export default function TrajectoryGenCanvas({ params, groups, selectedGroupId, s
     ctx.textBaseline = 'middle';
     ctx.fillText('goal', gxGoal + 8, gyGoal);
 
-    // Robot dot
     const [rdx, rdy] = toS(0, 0);
     ctx.beginPath();
     ctx.arc(rdx, rdy, 5, 0, Math.PI * 2);
@@ -259,7 +295,7 @@ export default function TrajectoryGenCanvas({ params, groups, selectedGroupId, s
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     ctx.fillText('exit position', rdx, rdy + 8);
-  }, [params, groups, selectedGroupId, selectedId, hoveredId]);
+  }, [params, groups, selectedGroupId, hoveredId]);
 
   useEffect(() => { draw(); }, [draw]);
 
@@ -270,6 +306,36 @@ export default function TrajectoryGenCanvas({ params, groups, selectedGroupId, s
     ro.observe(canvas);
     return () => ro.disconnect();
   }, [draw]);
+
+  const updateCanvasHover = useCallback((clientX: number, clientY: number) => {
+    const canvas = canvasRef.current;
+    const container = containerRef.current;
+    if (!canvas || !container) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const mx = clientX - rect.left;
+    const my = clientY - rect.top;
+    const hit = hitTestPolylines(hitPolylinesRef.current, mx, my);
+
+    onHoverTraj(hit?.id ?? null);
+
+    if (hit) {
+      const containerRect = container.getBoundingClientRect();
+      setTooltip({
+        x: clientX - containerRect.left,
+        y: clientY - containerRect.top,
+        exitVelocity: hit.traj.exitVelocity,
+        exitAngle: hit.traj.exitAngle,
+        timeOfFlight: hit.traj.timeOfFlight,
+      });
+    } else {
+      setTooltip(null);
+    }
+  }, [onHoverTraj]);
+
+  const clearCanvasHover = useCallback(() => {
+    setTooltip(null);
+  }, []);
 
   const handleWheel = useCallback((e: WheelEvent) => {
     e.preventDefault();
@@ -304,33 +370,55 @@ export default function TrajectoryGenCanvas({ params, groups, selectedGroupId, s
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     if (e.button !== 0) return;
     draggingRef.current = { lastX: e.clientX, lastY: e.clientY };
+    setTooltip(null);
     e.preventDefault();
   }, []);
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
-    if (!draggingRef.current) return;
-    const view = viewRef.current;
-    const dx = e.clientX - draggingRef.current.lastX;
-    const dy = e.clientY - draggingRef.current.lastY;
-    view.panX -= dx / view.zoom;
-    view.panY += dy / view.zoom;
-    draggingRef.current = { lastX: e.clientX, lastY: e.clientY };
-    draw();
-  }, [draw]);
+    if (draggingRef.current) {
+      const view = viewRef.current;
+      const dx = e.clientX - draggingRef.current.lastX;
+      const dy = e.clientY - draggingRef.current.lastY;
+      view.panX -= dx / view.zoom;
+      view.panY += dy / view.zoom;
+      draggingRef.current = { lastX: e.clientX, lastY: e.clientY };
+      draw();
+      return;
+    }
+    updateCanvasHover(e.clientX, e.clientY);
+  }, [draw, updateCanvasHover]);
 
   const handleMouseUp = useCallback(() => {
     draggingRef.current = null;
   }, []);
 
+  const handleMouseLeave = useCallback(() => {
+    draggingRef.current = null;
+    clearCanvasHover();
+    onHoverTraj(null);
+  }, [clearCanvasHover, onHoverTraj]);
+
   return (
-    <canvas
-      ref={canvasRef}
-      className="w-full h-full"
-      style={{ display: 'block', cursor: draggingRef.current ? 'grabbing' : 'grab' }}
-      onMouseDown={handleMouseDown}
-      onMouseMove={handleMouseMove}
-      onMouseUp={handleMouseUp}
-      onMouseLeave={handleMouseUp}
-    />
+    <div ref={containerRef} className="relative w-full h-full">
+      <canvas
+        ref={canvasRef}
+        className="w-full h-full"
+        style={{ display: 'block', cursor: draggingRef.current ? 'grabbing' : 'grab' }}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseLeave}
+      />
+      {tooltip && (
+        <div
+          className="absolute z-10 pointer-events-none px-2.5 py-1.5 rounded bg-gray-900 border border-gray-600 text-xs shadow-lg tabular-nums space-y-0.5"
+          style={{ left: tooltip.x + 12, top: tooltip.y + 12 }}
+        >
+          <div className="text-gray-300">Speed <span className="text-white font-mono">{tooltip.exitVelocity.toFixed(3)} m/s</span></div>
+          <div className="text-gray-300">Exit angle <span className="text-white font-mono">{tooltip.exitAngle.toFixed(2)}°</span></div>
+          <div className="text-gray-300">ToF <span className="text-white font-mono">{tooltip.timeOfFlight.toFixed(3)} s</span></div>
+        </div>
+      )}
+    </div>
   );
 }

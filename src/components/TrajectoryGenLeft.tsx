@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { TrajGenParams } from '../types';
-import { Play, Loader } from 'lucide-react';
+import { countTrajGenCombinations, type TrajGenProgress } from '../simulation';
+import { Play, Loader, RefreshCw } from 'lucide-react';
 import {
   panelAside, panelContent, panelSectionTitle, panelSubsectionTitle, panelLabel,
   panelLabelInline, panelInput, panelBody, panelHint, panelBtnPrimary, panelMeta,
@@ -10,7 +11,11 @@ interface Props {
   params: TrajGenParams;
   onChange: (p: TrajGenParams) => void;
   onGenerate: () => void;
+  onRefine: () => void;
   generating: boolean;
+  refining: boolean;
+  canRefine: boolean;
+  genProgress: TrajGenProgress | null;
   width: number;
 }
 
@@ -201,7 +206,10 @@ function NumInput({ label, unit, value, step, min, max, onChange }: {
   );
 }
 
-export default function TrajectoryGenLeft({ params, onChange, onGenerate, generating, width }: Props) {
+export default function TrajectoryGenLeft({
+  params, onChange, onGenerate, onRefine,
+  generating, refining, canRefine, genProgress, width,
+}: Props) {
   function set<K extends keyof TrajGenParams>(key: K, val: TrajGenParams[K]) {
     onChange({ ...params, [key]: val });
   }
@@ -215,6 +223,8 @@ export default function TrajectoryGenLeft({ params, onChange, onGenerate, genera
       dx = Math.round((dx + params.dxStep) * 1e6) / 1e6;
     }
   }
+
+  const busy = generating || refining;
 
   return (
     <aside className={`${panelAside} border-r border-gray-700 overflow-y-auto`} style={{ width }}>
@@ -296,27 +306,58 @@ export default function TrajectoryGenLeft({ params, onChange, onGenerate, genera
             onChange={(v) => set('velocityStep', Math.max(0.01, v))} />
         </div>
 
-        {/* Generate Button */}
+        {/* Generate / Refine */}
         <button
           onClick={onGenerate}
-          disabled={generating}
+          disabled={busy}
           className={`w-full ${panelBtnPrimary} font-semibold ${
-            generating
+            busy
               ? 'bg-gray-700 text-gray-400 cursor-not-allowed'
               : 'bg-blue-600 hover:bg-blue-500 text-white'
           }`}
         >
           {generating ? <Loader size={16} className="animate-spin" /> : <Play size={16} />}
-          {generating ? 'Generating & Refining...' : 'Generate Trajectories'}
+          {generating ? 'Generating…' : 'Generate Trajectories'}
         </button>
 
-        {/* Estimated count hint */}
-        <p className={`${panelHint} text-center`}>
-          {Math.round((params.exitAngleMax - params.exitAngleMin) / params.angleStep + 1) *
-           Math.round((params.velocityMax - params.velocityMin) / params.velocityStep + 1)} angle × velocity combinations
-          {dxValues.length > 0 && (
-            <> → up to {dxValues.length} distance group{dxValues.length !== 1 ? 's' : ''}</>
-          )}
+        <button
+          onClick={onRefine}
+          disabled={busy || !canRefine}
+          className={`w-full ${panelBtnPrimary} font-semibold ${
+            busy || !canRefine
+              ? 'bg-gray-700 text-gray-400 cursor-not-allowed'
+              : 'bg-gray-700 hover:bg-gray-600 text-white'
+          }`}
+        >
+          {refining ? <Loader size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+          {refining ? 'Refining…' : 'Refine Trajectories'}
+        </button>
+
+        {busy && (
+          <div className="space-y-1">
+            <div className="relative h-1.5 bg-gray-700 rounded-full overflow-hidden">
+              <div
+                className="absolute top-0 left-0 h-full bg-blue-500 rounded-full transition-all duration-100"
+                style={{ width: `${Math.round((genProgress?.progress ?? 0) * 100)}%` }}
+              />
+            </div>
+            <p className={`${panelHint} text-center tabular-nums`}>
+              {genProgress
+                ? genProgress.phase === 'searching'
+                  ? `Combination ${genProgress.current.toLocaleString()} / ${genProgress.total.toLocaleString()} · ${genProgress.found.toLocaleString()} candidates`
+                  : `Trajectory ${genProgress.current.toLocaleString()} / ${genProgress.total.toLocaleString()} refined`
+                : generating
+                ? 'Starting search…'
+                : 'Starting refine…'}
+            </p>
+            <p className={`${panelHint} text-center tabular-nums`}>
+              {Math.round((genProgress?.progress ?? 0) * 100)}% complete
+            </p>
+          </div>
+        )}
+
+        <p className={`${panelHint} text-center tabular-nums`}>
+          {countTrajGenCombinations(params).toLocaleString()} Combinations
         </p>
       </div>
     </aside>

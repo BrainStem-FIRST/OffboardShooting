@@ -56,6 +56,7 @@ export interface GeneratedTrajectory {
   landingX: number; // meters from robot (should be dx)
   successfulBracket?: boolean; // set after refine; undefined = not yet refined
   accurate?: boolean;          // landing error < refineThreshold; undefined = not yet refined
+  refineFailure?: 'bracket' | 'target_height'; // why refine failed; undefined if ok or not refined
   landingError?: number | null; // mm error after refine, null = not yet refined
 }
 
