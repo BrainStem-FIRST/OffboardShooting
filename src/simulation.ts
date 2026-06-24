@@ -1016,6 +1016,229 @@ export function simulateLanding(
   return lastCross;
 }
 
+export interface TrajectoryMoe {
+  speedMoe: number;
+  angleMoe: number;
+  combinedMoe: number;
+  speedMoePlus: number;
+  speedMoeMinus: number;
+  angleMoePlus: number;
+  angleMoeMinus: number;
+}
+
+const MOE_MAX_ITER = 50;
+const MOE_SPEED_MAX_DELTA = 15; // m/s
+const MOE_ANGLE_MAX_DELTA = 45; // deg
+
+function shotLandsInGoal(
+  exitVelocity: number,
+  exitAngleDeg: number,
+  drag: number,
+  magnus: number,
+  targetDy: number,
+  targetDx: number,
+  goalHalfWidth: number,
+): boolean {
+  if (exitVelocity <= 0) return false;
+  const landing = simulateLanding(exitVelocity, exitAngleDeg, drag, magnus, targetDy);
+  if (landing === null) return false;
+  return Math.abs(landing.landingX - targetDx) <= goalHalfWidth + 1e-12;
+}
+
+function landingEdgeError(
+  exitVelocity: number,
+  exitAngleDeg: number,
+  drag: number,
+  magnus: number,
+  targetDy: number,
+  targetDx: number,
+  goalHalfWidth: number,
+): number | null {
+  if (exitVelocity <= 0) return null;
+  const landing = simulateLanding(exitVelocity, exitAngleDeg, drag, magnus, targetDy);
+  if (landing === null) return null;
+  return Math.abs(landing.landingX - targetDx) - goalHalfWidth;
+}
+
+/** Binary-search one-sided margin (delta ≥ 0) until the shot misses the goal edge. */
+function binarySearchOneSidedMargin(
+  inGoalAtDelta: (delta: number) => boolean,
+  edgeErrorAtDelta: (delta: number) => number | null,
+  maxDelta: number,
+): number {
+  if (!inGoalAtDelta(0)) return 0;
+  if (inGoalAtDelta(maxDelta)) return maxDelta;
+
+  let lo = 0;
+  let hi = Math.min(maxDelta, 0.05);
+  while (hi < maxDelta && inGoalAtDelta(hi)) {
+    lo = hi;
+    hi = Math.min(maxDelta, hi * 2);
+  }
+  if (inGoalAtDelta(maxDelta)) return maxDelta;
+
+  let good = lo;
+  let bad = inGoalAtDelta(hi) ? maxDelta : hi;
+
+  for (let i = 0; i < MOE_MAX_ITER; i++) {
+    const mid = (good + bad) / 2;
+    if (inGoalAtDelta(mid)) good = mid;
+    else bad = mid;
+    const err = edgeErrorAtDelta(good);
+    if (err !== null && err >= -REFINE_THRESHOLD_M) break;
+    if (bad - good < 1e-10) break;
+  }
+  return good;
+}
+
+export function computeTrajectoryMoe(
+  traj: GeneratedTrajectory,
+  targetDx: number,
+  targetDy: number,
+  goalHalfWidth: number,
+  drag: number,
+  magnus: number,
+): TrajectoryMoe | null {
+  if (traj.successfulBracket === false || traj.accurate === false) return null;
+
+  const inGoal = (vel: number, angle: number) =>
+    shotLandsInGoal(vel, angle, drag, magnus, targetDy, targetDx, goalHalfWidth);
+
+  const nominalVel = traj.exitVelocity;
+  const nominalAngle = traj.exitAngle;
+
+  if (!inGoal(nominalVel, nominalAngle)) return null;
+
+  const edgeErr = (vel: number, angle: number) =>
+    landingEdgeError(vel, angle, drag, magnus, targetDy, targetDx, goalHalfWidth);
+
+  const speedMoePlus = binarySearchOneSidedMargin(
+    (d) => inGoal(nominalVel + d, nominalAngle),
+    (d) => edgeErr(nominalVel + d, nominalAngle),
+    MOE_SPEED_MAX_DELTA,
+  );
+  const speedMoeMinus = binarySearchOneSidedMargin(
+    (d) => nominalVel - d > 0 && inGoal(nominalVel - d, nominalAngle),
+    (d) => (nominalVel - d > 0 ? edgeErr(nominalVel - d, nominalAngle) : null),
+    nominalVel,
+  );
+  const angleMoePlus = binarySearchOneSidedMargin(
+    (d) => inGoal(nominalVel, nominalAngle + d),
+    (d) => edgeErr(nominalVel, nominalAngle + d),
+    MOE_ANGLE_MAX_DELTA,
+  );
+  const angleMoeMinus = binarySearchOneSidedMargin(
+    (d) => inGoal(nominalVel, nominalAngle - d),
+    (d) => edgeErr(nominalVel, nominalAngle - d),
+    MOE_ANGLE_MAX_DELTA,
+  );
+
+  const speedMoe = Math.min(speedMoePlus, speedMoeMinus);
+  const angleMoe = Math.min(angleMoePlus, angleMoeMinus);
+  const combinedMoe = Math.min(0.5, speedMoe) * Math.min(angleMoe, 3) * 0.1;
+
+  return {
+    speedMoe,
+    angleMoe,
+    combinedMoe,
+    speedMoePlus,
+    speedMoeMinus,
+    angleMoePlus,
+    angleMoeMinus,
+  };
+}
+
+export interface MoeRecalcProgress {
+  current: number;
+  total: number;
+  progress: number;
+}
+
+function appendTrajectoryMoe(
+  map: Map<string, TrajectoryMoe>,
+  g: TrajGroup,
+  t: GeneratedTrajectory,
+  half: number,
+  forceRecalculate: boolean,
+): void {
+  if (!forceRecalculate && t.speedMoe !== undefined && t.angleMoe !== undefined) {
+    map.set(t.id, {
+      speedMoe: t.speedMoe,
+      angleMoe: t.angleMoe,
+      combinedMoe: t.speedMoe * t.angleMoe * 0.1,
+      speedMoePlus: t.speedMoe,
+      speedMoeMinus: t.speedMoe,
+      angleMoePlus: t.angleMoe,
+      angleMoeMinus: t.angleMoe,
+    });
+    return;
+  }
+  const moe = computeTrajectoryMoe(t, g.dx, g.dy, half, g.drag, g.magnus);
+  if (moe) map.set(t.id, moe);
+}
+
+export function buildTrajectoryMoeMap(
+  groups: TrajGroup[],
+  errorTolerance: number,
+  forceRecalculate = false,
+): Map<string, TrajectoryMoe> {
+  const map = new Map<string, TrajectoryMoe>();
+  const half = errorTolerance / 2;
+  for (const g of groups) {
+    for (const t of g.trajectories) {
+      appendTrajectoryMoe(map, g, t, half, forceRecalculate);
+    }
+  }
+  return map;
+}
+
+export function buildTrajectoryMoeMapAsync(
+  groups: TrajGroup[],
+  errorTolerance: number,
+  forceRecalculate: boolean,
+  onProgress: (progress: MoeRecalcProgress) => void,
+  signal?: { cancelled: boolean },
+): Promise<Map<string, TrajectoryMoe>> {
+  return new Promise((resolve) => {
+    const map = new Map<string, TrajectoryMoe>();
+    const half = errorTolerance / 2;
+    type WorkItem = { group: TrajGroup; traj: GeneratedTrajectory };
+    const items: WorkItem[] = [];
+    for (const g of groups) {
+      for (const t of g.trajectories) items.push({ group: g, traj: t });
+    }
+    const total = items.length;
+    let index = 0;
+
+    onProgress({ current: 0, total, progress: total > 0 ? 0 : 1 });
+
+    function step() {
+      if (signal?.cancelled) {
+        resolve(map);
+        return;
+      }
+
+      let batch = TRAJ_GEN_YIELD_EVERY;
+      while (batch > 0 && index < total) {
+        const { group, traj } = items[index];
+        appendTrajectoryMoe(map, group, traj, half, forceRecalculate);
+        index++;
+        batch--;
+      }
+
+      onProgress({ current: index, total, progress: total > 0 ? index / total : 1 });
+
+      if (index < total) {
+        setTimeout(step, 0);
+      } else {
+        resolve(map);
+      }
+    }
+
+    step();
+  });
+}
+
 export function enumerateDxValues(dxMin: number, dxMax: number, dxStep: number): number[] {
   const values: number[] = [];
   let dx = dxMin;
@@ -1040,16 +1263,19 @@ export function closestIntervalPosition(landingX: number, dxValues: number[]): n
   return best;
 }
 
+/** Fixed horizontal tolerance for raw trajectory generation and in-goal success checks. */
+export const RAW_TRAJECTORY_ERROR_TOLERANCE = 0.5;
+
 // Sweep exit velocity and angle once; keep trajectories whose x at goal height
-// falls within [dxMin - errorTolerance, dxMax + errorTolerance].
+// falls within [dxMin - RAW/2, dxMax + RAW/2].
 export function generateTrajectories(
   params: TrajGenParams,
   drag: number,
   magnus: number
 ): GeneratedTrajectory[] {
   const results: GeneratedTrajectory[] = [];
-  const xMin = params.dxMin - params.errorTolerance * 0.5;
-  const xMax = params.dxMax + params.errorTolerance * 0.5;
+  const xMin = params.dxMin - RAW_TRAJECTORY_ERROR_TOLERANCE / 2;
+  const xMax = params.dxMax + RAW_TRAJECTORY_ERROR_TOLERANCE / 2;
 
   let vel = params.velocityMin;
   while (vel <= params.velocityMax + 1e-9) {
@@ -1136,7 +1362,7 @@ function assignRefinedTrajectory(
   const inGoal =
     successfulBracket &&
     landing !== null &&
-    Math.abs(landing.landingX - targetDx) <= params.errorTolerance / 2;
+    Math.abs(landing.landingX - targetDx) <= RAW_TRAJECTORY_ERROR_TOLERANCE / 2;
   const finalTraj: GeneratedTrajectory = {
     ...withImpact,
     successfulBracket: inGoal,
@@ -1215,8 +1441,8 @@ export function generateTrajectoriesAsync(
     }
 
     const totalCombos = countTrajGenCombinations(params);
-    const xMin = params.dxMin - params.errorTolerance;
-    const xMax = params.dxMax + params.errorTolerance;
+    const xMin = params.dxMin - RAW_TRAJECTORY_ERROR_TOLERANCE / 2;
+    const xMax = params.dxMax + RAW_TRAJECTORY_ERROR_TOLERANCE / 2;
     const raw: GeneratedTrajectory[] = [];
     let comboIndex = 0;
     let vel = params.velocityMin;
@@ -1647,19 +1873,25 @@ export function refineGroupTrajectories(
     if (!r.successfulBracket) return withImpact;
     const landing = simulateLanding(t.exitVelocity, t.exitAngle, drag, magnus, group.dy);
     const inGoal =
-      landing !== null && Math.abs(landing.landingX - group.dx) <= params.errorTolerance / 2;
+      landing !== null && Math.abs(landing.landingX - group.dx) <= RAW_TRAJECTORY_ERROR_TOLERANCE / 2;
     return { ...withImpact, landingX: group.dx, successfulBracket: inGoal, accurate: r.accurate && inGoal };
   });
   return dedupeTrajectories(withValidity);
 }
 
-export function groupExportPayload(group: TrajGroup) {
-  return {
-    dx: group.dx,
-    dy: group.dy,
-    dragCoeff: group.drag,
-    magnusCoeff: group.magnus,
-    trajectories: group.trajectories.map((t) => ({
+export function groupExportPayload(group: TrajGroup, errorTolerance: number) {
+  const half = errorTolerance / 2;
+  let biggestMOETrajectory = -1;
+  let bestCombined = -1;
+
+  const trajectories = group.trajectories.map((t, index) => {
+    const moe = computeTrajectoryMoe(t, group.dx, group.dy, half, group.drag, group.magnus);
+    if (moe && moe.combinedMoe > bestCombined) {
+      bestCombined = moe.combinedMoe;
+      biggestMOETrajectory = index;
+    }
+
+    const entry: Record<string, number> = {
       exitAngle: t.exitAngle,
       impactAngle: t.impactAngle,
       speed: t.exitVelocity,
@@ -1667,7 +1899,21 @@ export function groupExportPayload(group: TrajGroup) {
       peakHeight:
         Math.round(simulatePeakHeight(t.exitVelocity, t.exitAngle, group.drag, group.magnus) * 1000) /
         1000,
-    })),
+    };
+    if (moe) {
+      entry.speedMoe = Math.round(moe.speedMoe * 1000) / 1000;
+      entry.angleMoe = Math.round(moe.angleMoe * 1000) / 1000;
+    }
+    return entry;
+  });
+
+  return {
+    dx: group.dx,
+    dy: group.dy,
+    dragCoeff: group.drag,
+    magnusCoeff: group.magnus,
+    ...(biggestMOETrajectory >= 0 ? { biggestMOETrajectory } : {}),
+    trajectories,
   };
 }
 
@@ -1692,7 +1938,7 @@ export function downloadTrajectoriesArchive(groups: TrajGroup[], params: TrajGen
   const folderName = exportFolderName(params);
   const entries = groupsWithTrajs.map((g) => ({
     name: `${folderName}/${groupExportFileName(g)}`,
-    data: new TextEncoder().encode(JSON.stringify(groupExportPayload(g), null, 4)),
+    data: new TextEncoder().encode(JSON.stringify(groupExportPayload(g, params.errorTolerance), null, 4)),
   }));
 
   const blob = buildStoreZip(entries);

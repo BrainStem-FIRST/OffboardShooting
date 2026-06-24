@@ -4,11 +4,12 @@ import { VideoData, TrajectoryPoint, LaunchParams, GeneratedTrajectory, TrajGenP
 import SysIdSidebar from './components/SysIdSidebar';
 import VideoDisplay from './components/VideoDisplay';
 import SimulationControls from './components/SimulationControls';
-import TrajectoryGenCanvas from './components/TrajectoryGenCanvas';
+import TrajectoryGenCenter from './components/TrajectoryGenCenter';
 import TrajectoryGenLeft from './components/TrajectoryGenLeft';
 import TrajectoryGenRight from './components/TrajectoryGenRight';
-import { generateTrajectoriesAsync, refineTrajectoriesAsync, type TrajGenProgress } from './simulation';
+import { generateTrajectoriesAsync, refineTrajectoriesAsync, buildTrajectoryMoeMap, buildTrajectoryMoeMapAsync, type TrajGenProgress, type MoeRecalcProgress, type TrajectoryMoe } from './simulation';
 import { buildTrajectorySegments, resolveActiveSegment, getLaunchParams, createSkippedPoint, firstTrajectoryPoint } from './utils/trajectorySegments';
+import { isUnsuccessfulTrajectory } from './utils/trajGenStatus';
 import type { ImportedProjectEntry } from './utils/projectIO';
 import { MeterstickScale, defaultMeterstickPoints, scaleToPpmFn, horizontalizeMeterstickPoints, meterstickFromPoints, adjustSegmentMetersForPointChange, normalizeSegmentMeters, defaultSegmentMeters } from './utils/meterstickScale';
 
@@ -49,21 +50,21 @@ const DEFAULT_TRAJGEN_PARAMS: TrajGenParams = {
   dy: 1.8,
   dxMin: 1,
   dxMax: 5,
-  dxStep: 1,
+  dxStep: 0.2,
   errorTolerance: 0.4,
   exitAngleMin: 30,
   exitAngleMax: 85,
-  angleStep: 1,
-  impactAngleMin: 0,
+  angleStep: 0.5,
+  impactAngleMin: 35,
   impactAngleMax: 90,
   velocityMin: 4,
-  velocityMax: 12,
-  velocityStep: 0.05,
-  refineMaxIter: 200,
-  refineThreshold: 0.001,
+  velocityMax: 14,
+  velocityStep: 0.025,
+  refineMaxIter: 250,
+  refineThreshold: 0.0001,
   dragCoefficient: 0.01,
   magnusGain: 0,
-  magnusPower: 2,
+  magnusPower: 1,
 };
 
 function ResizeHandle({ onMouseDown }: { onMouseDown: (e: React.MouseEvent) => void }) {
@@ -114,6 +115,41 @@ export default function App() {
   const [refining, setRefining] = useState(false);
   const [genProgress, setGenProgress] = useState<TrajGenProgress | null>(null);
   const [hoveredTrajId, setHoveredTrajId] = useState<string | null>(null);
+  const [showAllTrajGenTrajectories, setShowAllTrajGenTrajectories] = useState(false);
+  const [showBiggestMoeTrajGen, setShowBiggestMoeTrajGen] = useState(false);
+  const [trajMoeById, setTrajMoeById] = useState<Map<string, TrajectoryMoe>>(() => new Map());
+  const [moeRecalculating, setMoeRecalculating] = useState(false);
+  const [moeRecalcProgress, setMoeRecalcProgress] = useState<MoeRecalcProgress | null>(null);
+  const trajGroupsRef = useRef(trajGroups);
+  trajGroupsRef.current = trajGroups;
+
+  const handleShowAllTrajGenChange = useCallback((checked: boolean) => {
+    setShowAllTrajGenTrajectories(checked);
+    if (checked) setShowBiggestMoeTrajGen(false);
+  }, []);
+
+  const handleShowBiggestMoeTrajGenChange = useCallback((checked: boolean) => {
+    setShowBiggestMoeTrajGen(checked);
+    if (checked) setShowAllTrajGenTrajectories(false);
+  }, []);
+
+  const handleRecalculateMoe = useCallback((errorTolerance: number) => {
+    setTrajGenParams((p) => ({ ...p, errorTolerance }));
+    const cleaned = trajGroupsRef.current.map((g) => ({
+      ...g,
+      biggestMOETrajectory: undefined,
+      trajectories: g.trajectories.map(({ speedMoe, angleMoe, ...t }) => t),
+    }));
+    setTrajGroups(cleaned);
+    setMoeRecalculating(true);
+    setMoeRecalcProgress(null);
+
+    void buildTrajectoryMoeMapAsync(cleaned, errorTolerance, true, setMoeRecalcProgress).then((map) => {
+      setTrajMoeById(map);
+      setMoeRecalculating(false);
+      setMoeRecalcProgress(null);
+    });
+  }, []);
 
   // Panel sizing
   const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT);
@@ -153,6 +189,36 @@ export default function App() {
 
   const selectedVideo = videos.find((v) => v.id === selectedId) ?? null;
   const selectedGroup = trajGroups.find(g => g.id === selectedGroupId) ?? trajGroups[0] ?? null;
+
+  useEffect(() => {
+    if (moeRecalculating) return;
+    setTrajMoeById(buildTrajectoryMoeMap(trajGroups, trajGenParams.errorTolerance, false));
+  }, [trajGroups, trajGenParams.errorTolerance, moeRecalculating]);
+
+  const bestMoeTrajIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const g of trajGroups) {
+      if (
+        g.biggestMOETrajectory !== undefined &&
+        g.biggestMOETrajectory >= 0 &&
+        g.biggestMOETrajectory < g.trajectories.length
+      ) {
+        ids.add(g.trajectories[g.biggestMOETrajectory].id);
+        continue;
+      }
+      let bestId: string | null = null;
+      let bestVal = -1;
+      for (const t of g.trajectories) {
+        const moe = trajMoeById.get(t.id);
+        if (moe && moe.combinedMoe > bestVal) {
+          bestVal = moe.combinedMoe;
+          bestId = t.id;
+        }
+      }
+      if (bestId) ids.add(bestId);
+    }
+    return ids;
+  }, [trajGroups, trajMoeById]);
 
   currentFrameRef.current = selectedVideo?.currentFrame ?? 0;
   totalFramesRef.current = totalFrames;
@@ -534,6 +600,25 @@ export default function App() {
     setGenProgress(null);
   }
 
+  function handleDeleteUnsuccessful() {
+    setTrajGroups((prev) => {
+      const next = prev
+        .map((g) => ({
+          ...g,
+          trajectories: g.trajectories.filter((t) => !isUnsuccessfulTrajectory(t)),
+        }))
+        .filter((g) => g.trajectories.length > 0);
+
+      if (hoveredTrajId && !next.some((g) => g.trajectories.some((t) => t.id === hoveredTrajId))) {
+        setHoveredTrajId(null);
+      }
+      if (selectedGroupId && !next.some((g) => g.id === selectedGroupId)) {
+        setSelectedGroupId(next.length > 0 ? next[0].id : null);
+      }
+      return next;
+    });
+  }
+
   function handleDeleteTraj(groupId: string, trajId: string) {
     setTrajGroups(prev => prev.map(g => {
       if (g.id !== groupId) return g;
@@ -810,16 +895,18 @@ export default function App() {
               </button>
             </div>
 
-            {/* Center: canvas */}
-            <main className="flex flex-1 min-w-0 min-h-0 bg-gray-950">
-              <TrajectoryGenCanvas
-                params={trajGenParams}
-                groups={trajGroups}
-                selectedGroupId={selectedGroup?.id ?? null}
-                hoveredId={hoveredTrajId}
-                onHoverTraj={setHoveredTrajId}
-              />
-            </main>
+            {/* Center: visualizer / MOE analysis */}
+            <TrajectoryGenCenter
+              params={trajGenParams}
+              groups={trajGroups}
+              selectedGroupId={selectedGroup?.id ?? null}
+              hoveredId={hoveredTrajId}
+              showAll={showAllTrajGenTrajectories}
+              showBiggestMoe={showBiggestMoeTrajGen}
+              trajMoeById={trajMoeById}
+              bestMoeTrajIds={bestMoeTrajIds}
+              onHoverTraj={setHoveredTrajId}
+            />
 
             {/* Right edge */}
             <div className="flex-shrink-0 flex flex-col relative">
@@ -849,6 +936,12 @@ export default function App() {
                 groups={trajGroups}
                 selectedGroupId={selectedGroup?.id ?? null}
                 hoveredTrajId={hoveredTrajId}
+                trajMoeById={trajMoeById}
+                bestMoeTrajIds={bestMoeTrajIds}
+                showAll={showAllTrajGenTrajectories}
+                onShowAllChange={handleShowAllTrajGenChange}
+                showBiggestMoe={showBiggestMoeTrajGen}
+                onShowBiggestMoeChange={handleShowBiggestMoeTrajGenChange}
                 onSelectGroup={setSelectedGroupId}
                 onHoverTraj={setHoveredTrajId}
                 onDeleteTraj={handleDeleteTraj}
@@ -856,12 +949,23 @@ export default function App() {
                 onUpdateGroup={(groupId, trajs) => {
                   setTrajGroups(prev => prev.map(g => g.id === groupId ? { ...g, trajectories: trajs } : g));
                 }}
-                onImportGroup={(group) => {
-                  setTrajGroups(prev => [...prev, group]);
-                  setSelectedGroupId(group.id);
+                onImportGroups={(newGroups, mode) => {
+                  if (mode === 'replace') {
+                    setTrajGroups(newGroups);
+                    setSelectedGroupId(newGroups[0]?.id ?? null);
+                    setHoveredTrajId(null);
+                  } else {
+                    setTrajGroups((prev) => [...prev, ...newGroups]);
+                    setSelectedGroupId((id) => id ?? newGroups[0]?.id ?? null);
+                  }
                 }}
                 onClearAll={handleClearAll}
+                onDeleteUnsuccessful={handleDeleteUnsuccessful}
                 params={trajGenParams}
+                onParamsChange={setTrajGenParams}
+                onRecalculateMoe={handleRecalculateMoe}
+                moeRecalculating={moeRecalculating}
+                moeRecalcProgress={moeRecalcProgress}
                 width={rightWidth}
               />
             </div>

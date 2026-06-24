@@ -122,6 +122,33 @@ export function openDirectoryPicker(options: {
   return window.showDirectoryPicker(options);
 }
 
+export async function pickFolderForImport(options?: {
+  mode?: 'read' | 'readwrite';
+  unsupportedMessage?: string;
+}): Promise<
+  | { ok: true; dir: FileSystemDirectoryHandle }
+  | { ok: false; cancelled: boolean; message: string }
+> {
+  const mode = options?.mode ?? 'readwrite';
+  const unsupportedMessage =
+    options?.unsupportedMessage ??
+    'Folder import requires Chrome or Edge. Your browser does not support folder selection.';
+
+  if (typeof window.showDirectoryPicker !== 'function') {
+    return { ok: false, cancelled: false, message: unsupportedMessage };
+  }
+
+  try {
+    const dir = await openDirectoryPicker({ mode });
+    return { ok: true, dir };
+  } catch (err) {
+    if ((err as DOMException).name === 'AbortError') {
+      return { ok: false, cancelled: true, message: '' };
+    }
+    return { ok: false, cancelled: false, message: pickerErrorMessage(err) };
+  }
+}
+
 export async function saveConfigsToDirectory(
   parentHandle: FileSystemDirectoryHandle,
   videos: VideoData[],

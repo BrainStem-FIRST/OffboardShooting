@@ -8,6 +8,8 @@ import {
   panelAside, panelContent, panelSectionTitle, panelSubsectionTitle, panelLabelInline, panelBody, panelHint,
   panelInputNumeric, panelBtnPrimary,
 } from './panelStyles';
+import { ProgressBar } from './ProgressBar';
+import { Checkbox, CheckboxLabel } from './Checkbox';
 
 interface TrajectoryFitEntry {
   id: string;
@@ -149,13 +151,7 @@ function FitParamRow({
 
   return (
     <div className={`flex items-center gap-2 ${inactive ? 'opacity-50' : ''}`}>
-      <input
-        type="checkbox"
-        checked={checked}
-        disabled={disabled}
-        onChange={onToggle}
-        className="accent-blue-500 shrink-0"
-      />
+      <Checkbox checked={checked} disabled={disabled} onChange={() => onToggle()} />
       <span className={`${panelHint} shrink-0 w-[4.5rem] text-gray-300`}>{label}</span>
       <input
         type="text"
@@ -678,31 +674,23 @@ export default function SimulationControls({
                 />
               </div>
 
-              <label className={`flex items-center gap-2 cursor-pointer ${!hasTrajectory ? 'opacity-50' : ''}`}>
-                <input
-                  type="checkbox"
-                  checked={fitWholeVideo}
-                  disabled={!hasTrajectory || fitStatus === 'running' || fitAllVideos}
-                  onChange={() => setFitWholeVideo((v) => !v)}
-                  className="accent-blue-500"
-                />
-                <span className={`${panelHint} text-gray-300`}>
-                  Fit whole video{fittableTrajectories.length > 0 ? ` (${fittableTrajectories.length})` : ''}
-                </span>
-              </label>
+              <CheckboxLabel
+                checked={fitWholeVideo}
+                disabled={!hasTrajectory || fitStatus === 'running' || fitAllVideos}
+                onChange={(v) => setFitWholeVideo(v)}
+                label={`Fit whole video${fittableTrajectories.length > 0 ? ` (${fittableTrajectories.length})` : ''}`}
+                labelClassName={`${panelHint} text-gray-300`}
+                wrapperClassName={!hasTrajectory ? 'opacity-50' : ''}
+              />
 
-              <label className={`flex items-center gap-2 cursor-pointer ${videosAvailable ? '' : 'opacity-50'}`}>
-                <input
-                  type="checkbox"
-                  checked={fitAllVideos}
-                  disabled={fitStatus === 'running' || !videosAvailable}
-                  onChange={() => setFitAllVideos((v) => !v)}
-                  className="accent-blue-500"
-                />
-                <span className={`${panelHint} text-gray-300`}>
-                  Fit all videos{fittableAllVideosTrajectories.length > 0 ? ` (${fittableAllVideosTrajectories.length})` : ''}
-                </span>
-              </label>
+              <CheckboxLabel
+                checked={fitAllVideos}
+                disabled={fitStatus === 'running' || !videosAvailable}
+                onChange={(v) => setFitAllVideos(v)}
+                label={`Fit all videos${fittableAllVideosTrajectories.length > 0 ? ` (${fittableAllVideosTrajectories.length})` : ''}`}
+                labelClassName={`${panelHint} text-gray-300`}
+                wrapperClassName={videosAvailable ? '' : 'opacity-50'}
+              />
 
               <div className="grid grid-cols-2 gap-2">
                 <div className="space-y-1">
@@ -818,22 +806,14 @@ export default function SimulationControls({
               )}
 
               {fitStatus === 'running' && (
-                <div className="space-y-1">
-                  <div className="relative h-1.5 bg-gray-700 rounded-full overflow-hidden">
-                    <div
-                      className="absolute top-0 left-0 h-full bg-blue-500 rounded-full transition-all duration-100"
-                      style={{ width: `${Math.round(fitProgress * 100)}%` }}
-                    />
-                  </div>
-                  <p className={`${panelHint} text-center tabular-nums`}>
-                    {fitProgressDetail
+                <ProgressBar
+                  progress={fitProgress}
+                  detail={
+                    fitProgressDetail
                       ? `Recursion ${fitProgressDetail.recursion}/${fitProgressDetail.numRecursions} · Grid ${fitProgressDetail.iteration}/${fitProgressDetail.gridSize} · ${fitProgressDetail.totalEvals.toLocaleString()} total`
-                      : 'Starting…'}
-                  </p>
-                  <p className={`${panelHint} text-center tabular-nums`}>
-                    {Math.round(fitProgress * 100)}% complete
-                  </p>
-                </div>
+                      : 'Starting…'
+                  }
+                />
               )}
 
               {fitStatus !== 'running' && !canFit && (

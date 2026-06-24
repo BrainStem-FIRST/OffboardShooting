@@ -2,6 +2,8 @@ import { useRef, useState, useEffect, useMemo } from 'react';
 import {
   Upload, Film, Trash2, Crosshair, RotateCcw, Save, Trash, SkipForward, FolderDown,
 } from 'lucide-react';
+import { ImportFolderButton } from './ImportFolderButton';
+import { CheckboxLabel } from './Checkbox';
 import { VideoData, TrajectoryPoint, Meterstick, LaunchParams } from '../types';
 import { empiricalFromPoints, gravityCorrectionQuality, type PixelsPerMeterSource } from '../simulation';
 import { MeterstickScale, scaleToPpmFn } from '../utils/meterstickScale';
@@ -24,7 +26,7 @@ import {
 } from '../utils/projectIO';
 import type { ImportedProjectEntry } from '../utils/projectIO';
 import {
-  panelAside, panelTab, panelSectionTitle, panelSubsectionTitle, panelItemTitle, panelLabelInline, panelBody,
+  panelAside, panelTab, panelSectionTitle, panelSubsectionTitle, panelItemTitle, panelBody,
   panelHint, panelMeta, panelInput, panelInputNumeric, panelBtn, panelBtnPrimary, panelListItem,
   panelEmpty, panelMono,
 } from './panelStyles';
@@ -386,74 +388,37 @@ export default function SysIdSidebar({
     })();
   }
 
-  function handleImportProjectClick() {
-    if (importBusyRef.current || saveBusyRef.current || saveProjectBusyRef.current) {
-      setProjectStatus({ ok: null, text: 'Import already in progress.' });
-      return;
-    }
+  function handleImportProjectFolder(dir: FileSystemDirectoryHandle) {
+    return (async () => {
+      projectDirHandleRef.current = dir;
 
-    if (typeof window.showDirectoryPicker !== 'function') {
-      setProjectStatus({
-        ok: false,
-        text: 'Import Project requires Chrome or Edge. Your browser does not support folder selection.',
-      });
-      return;
-    }
+      setProjectStatus({ ok: null, text: 'Scanning folder…' });
+      const fileNames = await listProjectFileNames(dir);
+      const preview = buildImportPreview(fileNames);
+      if (preview.pairs.length === 0) {
+        projectDirHandleRef.current = null;
+        setProjectStatus({
+          ok: false,
+          text: formatImportFailureMessage(scanImportFileNames(fileNames)),
+        });
+        return;
+      }
 
-    importBusyRef.current = true;
-    setImporting(true);
-    setProjectStatus(null);
+      setProjectStatus({ ok: null, text: 'Loading project files…' });
+      const loadResult = await loadProjectFromDir(dir);
+      if (!loadResult.ok) {
+        projectDirHandleRef.current = null;
+        setProjectStatus({ ok: false, text: loadResult.message });
+        return;
+      }
 
-    window.setTimeout(() => {
-      void (async () => {
-        try {
-          const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
-          projectDirHandleRef.current = handle;
-
-          setProjectStatus({ ok: null, text: 'Scanning folder…' });
-          const fileNames = await listProjectFileNames(handle);
-          const preview = buildImportPreview(fileNames);
-          if (preview.pairs.length === 0) {
-            projectDirHandleRef.current = null;
-            setProjectStatus({
-              ok: false,
-              text: formatImportFailureMessage(scanImportFileNames(fileNames)),
-            });
-            return;
-          }
-
-          setProjectStatus({ ok: null, text: 'Loading project files…' });
-          const loadResult = await loadProjectFromDir(handle);
-          if (!loadResult.ok) {
-            projectDirHandleRef.current = null;
-            setProjectStatus({ ok: false, text: loadResult.message });
-            return;
-          }
-
-          onImportProject(loadResult.entries);
-          let text = `Imported ${loadResult.entries.length} video(s). Save Project will update this folder.`;
-          if (loadResult.warnings.length > 0) {
-            text += ` ${loadResult.warnings.join(' ')}`;
-          }
-          setProjectStatus({ ok: true, text });
-        } catch (err) {
-          projectDirHandleRef.current = null;
-          if ((err as DOMException).name === 'AbortError') {
-            setProjectStatus({ ok: null, text: 'Import cancelled.' });
-            return;
-          }
-          const msg = err instanceof Error ? err.message : String(err);
-          setProjectStatus({ ok: false, text: `Import failed: ${msg}` });
-        } finally {
-          importBusyRef.current = false;
-          setImporting(false);
-        }
-      })();
-    }, 150);
-  }
-
-  if (importProjectActionRef) {
-    importProjectActionRef.current = handleImportProjectClick;
+      onImportProject(loadResult.entries);
+      let text = `Imported ${loadResult.entries.length} video(s). Save Project will update this folder.`;
+      if (loadResult.warnings.length > 0) {
+        text += ` ${loadResult.warnings.join(' ')}`;
+      }
+      setProjectStatus({ ok: true, text });
+    })();
   }
 
   function videoRowStats(v: VideoData) {
@@ -581,15 +546,30 @@ export default function SysIdSidebar({
               <Save size={14} />
               {savingProject ? 'Saving…' : 'Save Project'}
             </button>
-            <button
-              type="button"
-              onClick={handleImportProjectClick}
-              disabled={saving || savingProject || importing}
-              className={`w-full ${panelBtnPrimary} bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed py-1.5 text-sm`}
-            >
-              <FolderDown size={14} />
-              {importing ? 'Importing…' : 'Import Project'}
-            </button>
+            <ImportFolderButton
+              label="Import Project"
+              icon={FolderDown}
+              disabled={saving || savingProject}
+              busyRef={importBusyRef}
+              onImportingChange={setImporting}
+              actionRef={importProjectActionRef}
+              unsupportedMessage="Import Project requires Chrome or Edge. Your browser does not support folder selection."
+              onBeforeImport={() => {
+                if (saveBusyRef.current || saveProjectBusyRef.current) {
+                  setProjectStatus({ ok: null, text: 'Import already in progress.' });
+                  return false;
+                }
+                setProjectStatus(null);
+                return true;
+              }}
+              onBusy={() => setProjectStatus({ ok: null, text: 'Import already in progress.' })}
+              onCancel={() => setProjectStatus({ ok: null, text: 'Import cancelled.' })}
+              onError={(text) => {
+                projectDirHandleRef.current = null;
+                setProjectStatus({ ok: false, text });
+              }}
+              onFolderSelected={handleImportProjectFolder}
+            />
             <div className={`${panelMeta} text-[11px] leading-snug space-y-1.5`}>
               <p>
                 Import Project selects your project folder. Save Project then overwrites configs in that same folder.
@@ -747,43 +727,28 @@ export default function SysIdSidebar({
                 </div>
 
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-                  <label className="flex items-center gap-2 cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={showAllTrajectories}
-                      onChange={(e) => onShowAllTrajectoriesChange(e.target.checked)}
-                      className="h-4 w-4 rounded border-gray-600 bg-gray-800 text-blue-600 focus:ring-blue-500 focus:ring-offset-0 focus:ring-offset-gray-900"
-                    />
-                    <span className={panelLabelInline}>Show all</span>
-                  </label>
-                  <label
-                    className={`flex items-center gap-2 select-none ${
-                      segments.length < 2 ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'
-                    }`}
+                  <CheckboxLabel
+                    checked={showAllTrajectories}
+                    onChange={onShowAllTrajectoriesChange}
+                    label="Show all"
+                  />
+                  <CheckboxLabel
+                    checked={showAverageTrajectory}
+                    disabled={segments.length < 2}
+                    onChange={onShowAverageTrajectoryChange}
+                    label="Show average"
+                    wrapperClassName={segments.length < 2 ? 'opacity-40' : ''}
                     title={
                       segments.length < 2
                         ? 'Plot at least 2 trajectories to show the average'
                         : undefined
                     }
-                  >
-                    <input
-                      type="checkbox"
-                      checked={showAverageTrajectory}
-                      disabled={segments.length < 2}
-                      onChange={(e) => onShowAverageTrajectoryChange(e.target.checked)}
-                      className="h-4 w-4 rounded border-gray-600 bg-gray-800 text-blue-600 focus:ring-blue-500 focus:ring-offset-0 focus:ring-offset-gray-900 disabled:cursor-not-allowed"
-                    />
-                    <span className={panelLabelInline}>Show average</span>
-                  </label>
-                  <label className="flex items-center gap-2 cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={showTrajectoryPoints}
-                      onChange={(e) => onShowTrajectoryPointsChange(e.target.checked)}
-                      className="h-4 w-4 rounded border-gray-600 bg-gray-800 text-blue-600 focus:ring-blue-500 focus:ring-offset-0 focus:ring-offset-gray-900"
-                    />
-                    <span className={panelLabelInline}>Show points</span>
-                  </label>
+                  />
+                  <CheckboxLabel
+                    checked={showTrajectoryPoints}
+                    onChange={onShowTrajectoryPointsChange}
+                    label="Show points"
+                  />
                 </div>
               </div>
 

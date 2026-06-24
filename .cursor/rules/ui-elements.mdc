@@ -1,0 +1,5 @@
+---
+alwaysApply: true
+---
+when possible use UI elements in the folder src/components. when i ask you to make a new UI element that you deem common enough, write a reusable class and put it in src/compoments. For example this project uses multiple load folder buttons and progress bars. stuff like that is deemed common enough
+when doing any physics refactoring or calculations be extra careful and make sure your units are correct

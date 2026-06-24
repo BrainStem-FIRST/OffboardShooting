@@ -6,6 +6,7 @@ import {
   panelAside, panelContent, panelSectionTitle, panelSubsectionTitle, panelLabel,
   panelLabelInline, panelInput, panelBody, panelHint, panelBtnPrimary, panelMeta,
 } from './panelStyles';
+import { ProgressBar } from './ProgressBar';
 
 interface Props {
   params: TrajGenParams;
@@ -242,7 +243,7 @@ export default function TrajectoryGenLeft({
             onChangeMin={(v) => onChange({ ...params, dxMin: v })}
             onChangeMax={(v) => onChange({ ...params, dxMax: v })}
           />
-          <NumInput label="Distance Step" unit="m" value={params.dxStep} step={0.1} min={0.1}
+          <NumInput label="Distance Step" unit="m" value={params.dxStep} step={0.01} min={0.01}
             onChange={(v) => onChange({ ...params, dxStep: Math.max(0.1, v) })} />
           {dxValues.length > 0 && (
             <p className={panelHint}>
@@ -253,8 +254,6 @@ export default function TrajectoryGenLeft({
           )}
           <NumInput label="Height Offset (dy)" unit="m" value={params.dy} step={0.1}
             onChange={(v) => set('dy', v)} />
-          <NumInput label="Error Tolerance" unit="m" value={params.errorTolerance} step={0.05} min={0.05}
-            onChange={(v) => set('errorTolerance', Math.max(0.05, v))} />
           <NumInput label="Drag Coefficient" value={params.dragCoefficient} step={0.01} min={0} max={0.2}
             onChange={(v) => set('dragCoefficient', Math.min(0.2, Math.max(0, v)))} />
           <NumInput label="Magnus Coefficient" value={params.magnusGain} step={0.01} min={-0.3} max={0.3}
@@ -281,7 +280,7 @@ export default function TrajectoryGenLeft({
         <RangeRow
           label="Impact Angle Range"
           unit="deg"
-          min={35} max={90} step={0.5}
+          min={0} max={90} step={0.5}
           valMin={params.impactAngleMin} valMax={params.impactAngleMax}
           onChangeMin={(v) => set('impactAngleMin', v)}
           onChangeMax={(v) => set('impactAngleMax', v)}
@@ -334,26 +333,18 @@ export default function TrajectoryGenLeft({
         </button>
 
         {busy && (
-          <div className="space-y-1">
-            <div className="relative h-1.5 bg-gray-700 rounded-full overflow-hidden">
-              <div
-                className="absolute top-0 left-0 h-full bg-blue-500 rounded-full transition-all duration-100"
-                style={{ width: `${Math.round((genProgress?.progress ?? 0) * 100)}%` }}
-              />
-            </div>
-            <p className={`${panelHint} text-center tabular-nums`}>
-              {genProgress
+          <ProgressBar
+            progress={genProgress?.progress ?? 0}
+            detail={
+              genProgress
                 ? genProgress.phase === 'searching'
                   ? `Combination ${genProgress.current.toLocaleString()} / ${genProgress.total.toLocaleString()} · ${genProgress.found.toLocaleString()} candidates`
                   : `Trajectory ${genProgress.current.toLocaleString()} / ${genProgress.total.toLocaleString()} refined`
                 : generating
                 ? 'Starting search…'
-                : 'Starting refine…'}
-            </p>
-            <p className={`${panelHint} text-center tabular-nums`}>
-              {Math.round((genProgress?.progress ?? 0) * 100)}% complete
-            </p>
-          </div>
+                : 'Starting refine…'
+            }
+          />
         )}
 
         <p className={`${panelHint} text-center tabular-nums`}>

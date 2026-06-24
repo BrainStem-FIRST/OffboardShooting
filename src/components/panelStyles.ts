@@ -47,3 +47,10 @@ export const panelEmpty = 'text-sm text-gray-500 text-center leading-relaxed';
 export const panelMono = 'font-mono tabular-nums';
 
 export const panelDivider = 'border-t border-gray-700';
+
+export const panelCheckboxBase =
+  'h-4 w-4 shrink-0 rounded border-gray-600 bg-gray-800 cursor-pointer focus:outline-none focus:ring-2 focus:ring-offset-0 focus:ring-offset-gray-900 disabled:cursor-not-allowed disabled:opacity-50';
+
+export const panelCheckboxBlue = `${panelCheckboxBase} text-blue-500 focus:ring-blue-500`;
+
+export const panelCheckboxGreen = `${panelCheckboxBase} text-green-500 focus:ring-green-500`;

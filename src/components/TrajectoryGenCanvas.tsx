@@ -1,12 +1,16 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { TrajGenParams, TrajGroup, GeneratedTrajectory } from '../types';
-import { simulateShot, SIM_MAX_TIME, SIM_DT } from '../simulation';
+import { simulateShot, SIM_MAX_TIME, SIM_DT, enumerateDxValues, type TrajectoryMoe } from '../simulation';
 
 interface Props {
   params: TrajGenParams;
   groups: TrajGroup[];
   selectedGroupId: string | null;
   hoveredId: string | null;
+  showAll: boolean;
+  showBiggestMoe: boolean;
+  trajMoeById: Map<string, TrajectoryMoe>;
+  bestMoeTrajIds: Set<string>;
   onHoverTraj: (id: string | null) => void;
 }
 
@@ -28,12 +32,15 @@ interface CanvasTooltip {
   exitVelocity: number;
   exitAngle: number;
   timeOfFlight: number;
+  speedMoe: number | null;
+  angleMoe: number | null;
 }
 
 const INIT_ZOOM = 80;
 const HIT_THRESHOLD_PX = 8;
 const TRAJ_COLOR = 'rgba(59,130,246,0.3)';
 const TRAJ_HOVER_COLOR = '#93c5fd';
+const TRAJ_MAX_MOE_COLOR = 'rgba(52, 211, 153, 0.85)';
 
 function distToSegment(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
   const dx = x2 - x1;
@@ -61,7 +68,10 @@ function hitTestPolylines(polylines: HitPolyline[], mx: number, my: number): Hit
   return best;
 }
 
-export default function TrajectoryGenCanvas({ params, groups, selectedGroupId, hoveredId, onHoverTraj }: Props) {
+export default function TrajectoryGenCanvas({
+  params, groups, selectedGroupId, hoveredId, showAll, showBiggestMoe,
+  trajMoeById, bestMoeTrajIds, onHoverTraj,
+}: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<View>({ panX: -1, panY: -2, zoom: INIT_ZOOM });
@@ -134,96 +144,98 @@ export default function TrajectoryGenCanvas({ params, groups, selectedGroupId, h
     ctx.beginPath(); ctx.moveTo(0, groundY); ctx.lineTo(cssW, groundY); ctx.stroke();
     ctx.setLineDash([]);
 
-    const dxValues: number[] = [];
-    let dxCursor = params.dxMin;
-    while (dxCursor <= params.dxMax + 1e-9) {
-      dxValues.push(Math.round(dxCursor * 1e6) / 1e6);
-      dxCursor = Math.round((dxCursor + params.dxStep) * 1e6) / 1e6;
-    }
-
+    const dxValues = enumerateDxValues(params.dxMin, params.dxMax, params.dxStep);
     const selectedGroup = groups.find(g => g.id === selectedGroupId) ?? null;
+    const goalDy = params.dy;
 
-    for (const dx of dxValues) {
-      const isSelected = selectedGroup ? Math.abs(selectedGroup.dx - dx) < 1e-6 : false;
-      const [rx] = toS(0, 0);
-      const [gxBase, gyBase] = toS(dx, 0);
-      const dy = params.dy;
+    // Single goal line at goal height with dots at each distance interval
+    if (dxValues.length > 0) {
+      const [lineLeftX, lineY] = toS(dxValues[0], goalDy);
+      const [lineRightX] = toS(dxValues[dxValues.length - 1], goalDy);
 
-      ctx.strokeStyle = isSelected ? 'rgba(150,150,150,0.5)' : 'rgba(100,100,100,0.25)';
-      ctx.lineWidth = 1;
-      ctx.setLineDash([4, 5]);
-      ctx.beginPath();
-      ctx.moveTo(rx, groundY);
-      ctx.lineTo(gxBase, groundY);
-      ctx.stroke();
-
-      if (Math.abs(dy) > 0.01) {
-        const [goalX, goalY] = toS(dx, dy);
-        ctx.beginPath();
-        ctx.moveTo(gxBase, gyBase);
-        ctx.lineTo(goalX, goalY);
-        ctx.stroke();
-      }
-      ctx.setLineDash([]);
-    }
-
-    for (const dx of dxValues) {
-      const isSelected = selectedGroup ? Math.abs(selectedGroup.dx - dx) < 1e-6 : false;
-      if (isSelected) continue;
-      const dy = params.dy;
-      const halfGoal = params.errorTolerance / 2;
-      const [gxGoal, gyGoal] = toS(dx, dy);
-      const [gxLeft] = toS(dx - halfGoal, dy);
-      const [gxRight] = toS(dx + halfGoal, dy);
-      ctx.strokeStyle = 'rgba(52, 211, 153, 0.2)';
+      ctx.strokeStyle = '#34d399';
       ctx.lineWidth = 2;
       ctx.lineCap = 'round';
       ctx.beginPath();
-      ctx.moveTo(gxLeft, gyGoal);
-      ctx.lineTo(gxRight, gyGoal);
+      ctx.moveTo(lineLeftX, lineY);
+      ctx.lineTo(lineRightX, lineY);
       ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(gxGoal, gyGoal, 3, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(52, 211, 153, 0.2)';
-      ctx.fill();
       ctx.lineCap = 'butt';
-    }
 
-    if (selectedGroup) {
-      const [midSx] = toS(selectedGroup.dx / 2, 0);
+      for (const dx of dxValues) {
+        const isSelected = selectedGroup ? Math.abs(selectedGroup.dx - dx) < 1e-6 : false;
+        const [dotX, dotY] = toS(dx, goalDy);
+        ctx.beginPath();
+        ctx.arc(dotX, dotY, isSelected ? 5 : 3.5, 0, Math.PI * 2);
+        ctx.fillStyle = isSelected ? '#6ee7b7' : '#34d399';
+        ctx.fill();
+        if (isSelected) {
+          ctx.strokeStyle = '#a7f3d0';
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        }
+      }
+
+      const [midSx] = toS((dxValues[0] + dxValues[dxValues.length - 1]) / 2, goalDy);
       ctx.fillStyle = 'rgba(156,163,175,0.6)';
       ctx.font = '11px system-ui';
       ctx.textAlign = 'center';
-      ctx.textBaseline = 'top';
-      ctx.fillText(`dx = ${selectedGroup.dx.toFixed(2)} m`, midSx, groundY + 5);
+      ctx.textBaseline = goalDy >= 0 ? 'bottom' : 'top';
+      const labelOffset = goalDy >= 0 ? -6 : 6;
+      ctx.fillText(
+        dxValues.length === 1
+          ? `goal dx = ${dxValues[0].toFixed(2)} m`
+          : `goal dx ${params.dxMin.toFixed(2)}–${params.dxMax.toFixed(2)} m`,
+        midSx,
+        lineY + labelOffset
+      );
 
-      if (Math.abs(params.dy) > 0.01) {
-        const [gxGoal, gyGoal] = toS(selectedGroup.dx, params.dy);
+      if (Math.abs(goalDy) > 0.01) {
+        const [rx] = toS(0, 0);
+        const [, gyBase] = toS(0, goalDy);
+        ctx.strokeStyle = 'rgba(100,100,100,0.25)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 5]);
+        ctx.beginPath();
+        ctx.moveTo(rx, groundY);
+        ctx.lineTo(rx, gyBase);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
         ctx.fillStyle = 'rgba(156,163,175,0.6)';
         ctx.font = '11px system-ui';
         ctx.textAlign = 'right';
         ctx.textBaseline = 'middle';
-        ctx.fillText(`dy = ${params.dy > 0 ? '+' : ''}${params.dy.toFixed(2)} m`, gxGoal - 8, (gyGoal + groundY) / 2);
+        ctx.fillText(`dy = ${goalDy > 0 ? '+' : ''}${goalDy.toFixed(2)} m`, rx - 8, (gyBase + groundY) / 2);
       }
-    } else if (dxValues.length > 0) {
-      const dx0 = dxValues[0];
-      const [midSx] = toS(dx0 / 2, 0);
-      ctx.fillStyle = 'rgba(156,163,175,0.4)';
-      ctx.font = '11px system-ui';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'top';
-      ctx.fillText(`dx range: ${params.dxMin.toFixed(2)}–${params.dxMax.toFixed(2)} m`, midSx, groundY + 5);
     }
 
-    const activeTraj = selectedGroup ? selectedGroup.trajectories : [];
-    const activeDrag = selectedGroup ? selectedGroup.drag : params.dragCoefficient;
-    const activeMagnus = selectedGroup ? selectedGroup.magnus : params.magnusGain;
     const activeMagnusPower = params.magnusPower ?? 2;
+
+    type TrajDrawEntry = { traj: GeneratedTrajectory; drag: number; magnus: number };
+    const trajEntries: TrajDrawEntry[] = showBiggestMoe
+      ? groups.flatMap((g) => {
+          const best = g.trajectories.find((t) => bestMoeTrajIds.has(t.id));
+          return best ? [{ traj: best, drag: g.drag, magnus: g.magnus }] : [];
+        })
+      : showAll
+      ? groups.flatMap((g) => g.trajectories.map((traj) => ({ traj, drag: g.drag, magnus: g.magnus })))
+      : (selectedGroup?.trajectories ?? []).map((traj) => ({
+          traj,
+          drag: selectedGroup!.drag,
+          magnus: selectedGroup!.magnus,
+        }));
 
     const polylines: HitPolyline[] = [];
 
-    function drawTraj(traj: GeneratedTrajectory, strokeStyle: string, lineWidth: number) {
-      const simPts = simulateShot(traj.exitVelocity, traj.exitAngle, activeDrag, activeMagnus, SIM_MAX_TIME, SIM_DT, activeMagnusPower);
+    function drawTraj(
+      traj: GeneratedTrajectory,
+      drag: number,
+      magnus: number,
+      strokeStyle: string,
+      lineWidth: number
+    ) {
+      const simPts = simulateShot(traj.exitVelocity, traj.exitAngle, drag, magnus, SIM_MAX_TIME, SIM_DT, activeMagnusPower);
       const screenPts: [number, number][] = [];
       ctx.beginPath();
       let started = false;
@@ -242,44 +254,23 @@ export default function TrajectoryGenCanvas({ params, groups, selectedGroupId, h
       }
     }
 
-    for (const traj of activeTraj) {
-      if (traj.id === hoveredId) continue;
-      drawTraj(traj, TRAJ_COLOR, 1);
+    for (const { traj, drag, magnus } of trajEntries) {
+      if (traj.id === hoveredId || bestMoeTrajIds.has(traj.id)) continue;
+      drawTraj(traj, drag, magnus, TRAJ_COLOR, 1);
+    }
+
+    for (const { traj, drag, magnus } of trajEntries) {
+      if (bestMoeTrajIds.has(traj.id) && traj.id !== hoveredId) {
+        drawTraj(traj, drag, magnus, TRAJ_MAX_MOE_COLOR, 2);
+      }
     }
 
     if (hoveredId) {
-      const hovered = activeTraj.find(t => t.id === hoveredId);
-      if (hovered) drawTraj(hovered, TRAJ_HOVER_COLOR, 2);
+      const hovered = trajEntries.find((e) => e.traj.id === hoveredId);
+      if (hovered) drawTraj(hovered.traj, hovered.drag, hovered.magnus, TRAJ_HOVER_COLOR, 2);
     }
 
     hitPolylinesRef.current = polylines;
-
-    const activeDx = selectedGroup ? selectedGroup.dx : (dxValues[0] ?? params.dxMin);
-    const activeDy = params.dy;
-    const halfGoal = params.errorTolerance / 2;
-    const [gxGoal, gyGoal] = toS(activeDx, activeDy);
-    const [gxLeft] = toS(activeDx - halfGoal, activeDy);
-    const [gxRight] = toS(activeDx + halfGoal, activeDy);
-
-    ctx.strokeStyle = '#34d399';
-    ctx.lineWidth = 3;
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.moveTo(gxLeft, gyGoal);
-    ctx.lineTo(gxRight, gyGoal);
-    ctx.stroke();
-    ctx.lineCap = 'butt';
-
-    ctx.beginPath();
-    ctx.arc(gxGoal, gyGoal, 4, 0, Math.PI * 2);
-    ctx.fillStyle = '#34d399';
-    ctx.fill();
-
-    ctx.fillStyle = '#6ee7b7';
-    ctx.font = 'bold 12px system-ui';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('goal', gxGoal + 8, gyGoal);
 
     const [rdx, rdy] = toS(0, 0);
     ctx.beginPath();
@@ -295,7 +286,7 @@ export default function TrajectoryGenCanvas({ params, groups, selectedGroupId, h
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     ctx.fillText('exit position', rdx, rdy + 8);
-  }, [params, groups, selectedGroupId, hoveredId]);
+  }, [params, groups, selectedGroupId, hoveredId, showAll, showBiggestMoe, bestMoeTrajIds]);
 
   useEffect(() => { draw(); }, [draw]);
 
@@ -321,17 +312,20 @@ export default function TrajectoryGenCanvas({ params, groups, selectedGroupId, h
 
     if (hit) {
       const containerRect = container.getBoundingClientRect();
+      const moe = trajMoeById.get(hit.id);
       setTooltip({
         x: clientX - containerRect.left,
         y: clientY - containerRect.top,
         exitVelocity: hit.traj.exitVelocity,
         exitAngle: hit.traj.exitAngle,
         timeOfFlight: hit.traj.timeOfFlight,
+        speedMoe: moe?.speedMoe ?? null,
+        angleMoe: moe?.angleMoe ?? null,
       });
     } else {
       setTooltip(null);
     }
-  }, [onHoverTraj]);
+  }, [onHoverTraj, trajMoeById]);
 
   const clearCanvasHover = useCallback(() => {
     setTooltip(null);
@@ -414,8 +408,8 @@ export default function TrajectoryGenCanvas({ params, groups, selectedGroupId, h
           className="absolute z-10 pointer-events-none px-2.5 py-1.5 rounded bg-gray-900 border border-gray-600 text-xs shadow-lg tabular-nums space-y-0.5"
           style={{ left: tooltip.x + 12, top: tooltip.y + 12 }}
         >
-          <div className="text-gray-300">Speed <span className="text-white font-mono">{tooltip.exitVelocity.toFixed(3)} m/s</span></div>
-          <div className="text-gray-300">Exit angle <span className="text-white font-mono">{tooltip.exitAngle.toFixed(2)}°</span></div>
+          <div className="text-gray-300">Speed <span className="text-white font-mono">{tooltip.exitVelocity.toFixed(3)} m/s</span>{tooltip.speedMoe !== null && <span className="text-gray-500 font-mono"> ±{tooltip.speedMoe.toFixed(3)}</span>}</div>
+          <div className="text-gray-300">Exit angle <span className="text-white font-mono">{tooltip.exitAngle.toFixed(2)}°</span>{tooltip.angleMoe !== null && <span className="text-gray-500 font-mono"> ±{tooltip.angleMoe.toFixed(2)}°</span>}</div>
           <div className="text-gray-300">ToF <span className="text-white font-mono">{tooltip.timeOfFlight.toFixed(3)} s</span></div>
         </div>
       )}

@@ -58,6 +58,8 @@ export interface GeneratedTrajectory {
   accurate?: boolean;          // landing error < refineThreshold; undefined = not yet refined
   refineFailure?: 'bracket' | 'target_height'; // why refine failed; undefined if ok or not refined
   landingError?: number | null; // mm error after refine, null = not yet refined
+  speedMoe?: number; // m/s margin of error (from export or import)
+  angleMoe?: number; // deg margin of error (from export or import)
 }
 
 // A group of trajectories all targeting the same (dx, dy)
@@ -68,6 +70,8 @@ export interface TrajGroup {
   drag: number;
   magnus: number;
   trajectories: GeneratedTrajectory[];
+  /** Index into trajectories for best combined MOE (from JSON import). */
+  biggestMOETrajectory?: number;
 }
 
 export interface TrajGenParams {
@@ -76,7 +80,7 @@ export interface TrajGenParams {
   dxMin: number; // range slider min
   dxMax: number; // range slider max
   dxStep: number; // step between distances
-  errorTolerance: number; // meters, horizontal acceptance zone at goal height
+  errorTolerance: number; // meters, horizontal goal width for MOE / optimal trajectory selection
   exitAngleMin: number;
   exitAngleMax: number;
   angleStep: number;

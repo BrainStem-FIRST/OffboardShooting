@@ -1,37 +1,137 @@
 import { useState, useEffect, useRef } from 'react';
 import { GeneratedTrajectory, TrajGroup, TrajGenParams } from '../types';
-import { Trash2, Download, Upload, RefreshCw, Copy, ChevronUp, ChevronDown, XCircle, X } from 'lucide-react';
+import { Trash2, Download, Upload, RefreshCw, Copy, ChevronUp, ChevronDown, XCircle, X, FolderOpen, Save } from 'lucide-react';
+import { ImportFolderButton } from './ImportFolderButton';
 import {
   simulateLanding, simulateImpactAngle, refineTrajectory, downloadTrajectoriesArchive,
-  REFINE_MAX_ITER, REFINE_THRESHOLD_M,
+  REFINE_MAX_ITER, REFINE_THRESHOLD_M, RAW_TRAJECTORY_ERROR_TOLERANCE, type TrajectoryMoe, type MoeRecalcProgress,
 } from '../simulation';
 import {
   panelAside, panelSectionTitle, panelBtnPrimary,
-  panelEmpty, panelHint, panelMeta, panelMono,
+  panelEmpty, panelHint, panelMeta, panelMono, panelSubsectionTitle, panelInput,
 } from './panelStyles';
+import { ProgressBar } from './ProgressBar';
+import { CheckboxLabel } from './Checkbox';
+import { isUnsuccessfulTrajectory } from '../utils/trajGenStatus';
+import { parseTrajGroupFromText, loadTrajGroupsFromDirectory, saveTrajGroupsToDirectory } from '../utils/trajGenIO';
 
 interface Props {
   groups: TrajGroup[];
   selectedGroupId: string | null;
   hoveredTrajId: string | null;
+  trajMoeById: Map<string, TrajectoryMoe>;
+  bestMoeTrajIds: Set<string>;
   onSelectGroup: (id: string) => void;
   onHoverTraj: (id: string | null) => void;
   onDeleteTraj: (groupId: string, trajId: string) => void;
   onDeleteGroup: (groupId: string) => void;
   onUpdateGroup: (groupId: string, trajs: GeneratedTrajectory[]) => void;
-  onImportGroup: (group: TrajGroup) => void;
+  onImportGroups: (groups: TrajGroup[], mode: 'replace' | 'append') => void;
   onClearAll: () => void;
+  onDeleteUnsuccessful: () => void;
+  showAll: boolean;
+  onShowAllChange: (showAll: boolean) => void;
+  showBiggestMoe: boolean;
+  onShowBiggestMoeChange: (showBiggestMoe: boolean) => void;
   params: TrajGenParams;
+  onParamsChange: (params: TrajGenParams) => void;
+  onRecalculateMoe: (errorTolerance: number) => void;
+  moeRecalculating: boolean;
+  moeRecalcProgress: MoeRecalcProgress | null;
   width: number;
+}
+
+function ErrorToleranceInput({
+  value,
+  onChange,
+  onRecalculate,
+  recalcDisabled,
+  recalculating,
+  recalcProgress,
+}: {
+  value: number;
+  onChange: (v: number) => void;
+  onRecalculate: (errorTolerance: number) => void;
+  recalcDisabled: boolean;
+  recalculating: boolean;
+  recalcProgress: MoeRecalcProgress | null;
+}) {
+  const [raw, setRaw] = useState(String(value));
+  const [focused, setFocused] = useState(false);
+
+  useEffect(() => {
+    if (!focused) setRaw(String(value));
+  }, [value, focused]);
+
+  function commit(str: string) {
+    const stripped = str.replace(/[^0-9.\-]/g, '');
+    let n = parseFloat(stripped);
+    if (isNaN(n)) n = 0.05;
+    n = Math.max(0.05, n);
+    setRaw(String(n));
+    onChange(n);
+    return n;
+  }
+
+  function handleRecalculate() {
+    const n = commit(raw);
+    onRecalculate(n);
+  }
+
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between">
+        <label className={panelSubsectionTitle}>Error Tolerance</label>
+        <span className={panelMeta}>m</span>
+      </div>
+      <div className="flex items-center gap-2">
+        <input
+          type="text"
+          inputMode="decimal"
+          value={raw}
+          onChange={(e) => setRaw(e.target.value)}
+          onFocus={() => setFocused(true)}
+          onBlur={(e) => { setFocused(false); commit(e.target.value); }}
+          onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+          className={`${panelInput} flex-1 min-w-0`}
+        />
+        <button
+          type="button"
+          onClick={handleRecalculate}
+          disabled={recalcDisabled || recalculating}
+          className={`flex-shrink-0 px-2.5 py-1.5 text-sm rounded border transition-colors ${
+            recalcDisabled || recalculating
+              ? 'border-gray-700 bg-gray-800 text-gray-500 cursor-not-allowed'
+              : 'border-gray-600 bg-gray-700 hover:bg-gray-600 text-white'
+          }`}
+        >
+          {recalculating ? 'Recalculating…' : 'Recalculate'}
+        </button>
+      </div>
+      {recalculating && (
+        <ProgressBar
+          className="pt-1"
+          progress={recalcProgress?.progress ?? 0}
+          fillClassName="bg-green-500"
+          detail={
+            recalcProgress
+              ? `Trajectory ${recalcProgress.current.toLocaleString()} / ${recalcProgress.total.toLocaleString()}`
+              : 'Starting…'
+          }
+        />
+      )}
+    </div>
+  );
 }
 
 type SortKey = 'exitVelocity' | 'exitAngle' | 'impactAngle' | 'timeOfFlight' | 'landingError';
 
 export default function TrajectoryGenRight({
-  groups, selectedGroupId, hoveredTrajId,
+  groups, selectedGroupId, hoveredTrajId, trajMoeById, bestMoeTrajIds,
   onSelectGroup, onHoverTraj,
-  onDeleteTraj, onDeleteGroup, onUpdateGroup, onImportGroup, onClearAll,
-  params, width
+  onDeleteTraj, onDeleteGroup, onUpdateGroup, onImportGroups, onClearAll, onDeleteUnsuccessful,
+  showAll, onShowAllChange, showBiggestMoe, onShowBiggestMoeChange,
+  params, onParamsChange, onRecalculateMoe, moeRecalculating, moeRecalcProgress, width
 }: Props) {
   const group = groups.find(g => g.id === selectedGroupId) ?? groups[0] ?? null;
   const trajectories = group?.trajectories ?? [];
@@ -47,7 +147,13 @@ export default function TrajectoryGenRight({
   const cellRawRef = useRef(cellRaw);
   const committingRef = useRef(false);
   const importInputRef = useRef<HTMLInputElement>(null);
-  const [importError, setImportError] = useState<string | null>(null);
+  const importBusyRef = useRef(false);
+  const saveBusyRef = useRef(false);
+  const trajWriteDirRef = useRef<FileSystemDirectoryHandle | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [importStatus, setImportStatus] = useState<{ ok: boolean | null; text: string } | null>(null);
+  const [folderImportPrompt, setFolderImportPrompt] = useState<TrajGroup[] | null>(null);
 
   useEffect(() => { activeCellRef.current = activeCell; }, [activeCell]);
   useEffect(() => { cellRawRef.current = cellRaw; }, [cellRaw]);
@@ -76,14 +182,13 @@ export default function TrajectoryGenRight({
     result: ReturnType<typeof refineTrajectory>,
     dx: number,
     dy: number,
-    errorTolerance: number
   ): GeneratedTrajectory {
     const t = result.trajectory;
     const impact = simulateImpactAngle(t.exitVelocity, t.exitAngle, dragRef.current, magnusRef.current, dx);
     const withImpact = { ...t, impactAngle: impact !== null ? Math.round(impact * 100) / 100 : t.impactAngle };
     if (!result.successfulBracket) return withImpact;
     const landing = simulateLanding(t.exitVelocity, t.exitAngle, dragRef.current, magnusRef.current, dy);
-    const inGoal = landing !== null && Math.abs(landing.landingX - dx) <= errorTolerance / 2;
+    const inGoal = landing !== null && Math.abs(landing.landingX - dx) <= RAW_TRAJECTORY_ERROR_TOLERANCE / 2;
     return { ...withImpact, successfulBracket: inGoal, accurate: result.accurate && inGoal };
   }
 
@@ -114,7 +219,7 @@ export default function TrajectoryGenRight({
         const p = paramsRef.current;
         const gParams = { ...p, dx: g.dx, dy: g.dy };
         const result = refineTrajectory(traj, gParams, dragRef.current, magnusRef.current, REFINE_MAX_ITER, REFINE_THRESHOLD_M, 'angle');
-        const refined = applyRefineResult(traj, result, g.dx, g.dy, p.errorTolerance);
+        const refined = applyRefineResult(traj, result, g.dx, g.dy);
         onUpdateGroup(g.id, trajectoriesRef.current.map(tr => tr.id === id ? refined : tr));
       }
     }
@@ -190,7 +295,7 @@ export default function TrajectoryGenRight({
     if (!traj) return;
     const gParams = { ...params, dx: group.dx, dy: group.dy };
     const result = refineTrajectory(traj, gParams, drag, magnus, REFINE_MAX_ITER, REFINE_THRESHOLD_M, 'angle');
-    const refined = applyRefineResult(traj, result, group.dx, group.dy, params.errorTolerance);
+    const refined = applyRefineResult(traj, result, group.dx, group.dy);
     onUpdateGroup(group.id, trajectories.map(tr => tr.id === id ? refined : tr));
   }
 
@@ -198,49 +303,110 @@ export default function TrajectoryGenRight({
     downloadTrajectoriesArchive(groups, params);
   }
 
+  function handleSaveAllClick() {
+    if (saveBusyRef.current || importBusyRef.current) return;
+    if (totalTrajectoryCount === 0) return;
+
+    if (!trajWriteDirRef.current) {
+      setImportStatus({
+        ok: false,
+        text: 'Import a trajectory folder first — Save All writes to the folder you imported from.',
+      });
+      return;
+    }
+
+    saveBusyRef.current = true;
+    setSaving(true);
+    setImportStatus(null);
+
+    void (async () => {
+      try {
+        const result = await saveTrajGroupsToDirectory(
+          trajWriteDirRef.current!,
+          groups,
+          params.errorTolerance,
+          (current, total) => {
+            setImportStatus({ ok: null, text: `Saving trajectories ${current}/${total}…` });
+          },
+        );
+        if (!result.ok) {
+          setImportStatus({ ok: false, text: result.message });
+          return;
+        }
+        setImportStatus({
+          ok: true,
+          text: `Saved ${result.count} trajectory file(s) to imported folder (replaced existing).`,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setImportStatus({ ok: false, text: `Could not save trajectories: ${msg}` });
+      } finally {
+        saveBusyRef.current = false;
+        setSaving(false);
+      }
+    })();
+  }
+
   function handleImportFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
     e.target.value = '';
-    setImportError(null);
+    setImportStatus(null);
     const reader = new FileReader();
     reader.onload = (ev) => {
-      try {
-        const json = JSON.parse(ev.target?.result as string);
-        const importedDrag = typeof json.dragCoeff === 'number' ? json.dragCoeff : null;
-        const importedMagnus = typeof json.magnusCoeff === 'number' ? json.magnusCoeff : null;
-        const importedDx = typeof json.dx === 'number' ? json.dx : null;
-        const importedDy = typeof json.dy === 'number' ? json.dy : null;
-        if (importedDrag === null || importedMagnus === null || importedDx === null || importedDy === null) {
-          setImportError('Missing required fields: dragCoeff, magnusCoeff, dx, dy');
-          return;
-        }
-        if (!Array.isArray(json.trajectories)) {
-          setImportError('Missing trajectories array');
-          return;
-        }
-        const trajs: GeneratedTrajectory[] = (json.trajectories as Record<string, number>[]).map((t, i) => ({
-          id: `import-${Date.now()}-${i}`,
-          exitVelocity: t.speed ?? 0,
-          exitAngle: t.exitAngle ?? 0,
-          impactAngle: t.impactAngle ?? 0,
-          timeOfFlight: t.timeOfFlight ?? 0,
-          landingX: importedDx,
-        }));
-        const newGroup: TrajGroup = {
-          id: `import-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-          dx: importedDx,
-          dy: importedDy,
-          drag: importedDrag,
-          magnus: importedMagnus,
-          trajectories: trajs,
-        };
-        onImportGroup(newGroup);
-      } catch {
-        setImportError('Invalid JSON file');
+      const group = parseTrajGroupFromText(ev.target?.result as string);
+      if (!group) {
+        setImportStatus({ ok: false, text: 'Invalid JSON or missing required fields (dragCoeff, magnusCoeff, dx, dy, trajectories).' });
+        return;
       }
+      onImportGroups([group], 'append');
+      setImportStatus({ ok: true, text: `Imported 1 group (${group.dx.toFixed(3)}, ${group.dy.toFixed(3)}).` });
     };
+    reader.onerror = () => setImportStatus({ ok: false, text: 'Failed to read file.' });
     reader.readAsText(file);
+  }
+
+  function applyFolderImport(groups: TrajGroup[], mode: 'replace' | 'append') {
+    onImportGroups(groups, mode);
+    setFolderImportPrompt(null);
+    setImportStatus({
+      ok: true,
+      text: mode === 'replace'
+        ? `Imported ${groups.length} group(s), replaced current trajectories. Save All will update this folder.`
+        : `Imported ${groups.length} group(s), added to current trajectories. Save All will update this folder.`,
+    });
+  }
+
+  async function handleImportTrajFolder(dir: FileSystemDirectoryHandle) {
+    setImportStatus({ ok: null, text: 'Loading trajectory files…' });
+    const loadResult = await loadTrajGroupsFromDirectory(dir);
+    if (!loadResult.ok) {
+      setImportStatus({ ok: false, text: loadResult.message });
+      return;
+    }
+
+    trajWriteDirRef.current = loadResult.writeDir;
+
+    if (totalTrajectoryCount > 0) {
+      setFolderImportPrompt(loadResult.groups);
+      if (loadResult.warnings.length > 0) {
+        setImportStatus({ ok: null, text: loadResult.warnings.join(' ') });
+      }
+      return;
+    }
+
+    applyFolderImport(loadResult.groups, 'replace');
+    if (loadResult.warnings.length > 0) {
+      setImportStatus((prev) => ({
+        ok: true,
+        text: `${prev?.text ?? `Imported ${loadResult.groups.length} group(s). Save All will update this folder.`} ${loadResult.warnings.join(' ')}`.trim(),
+      }));
+    } else {
+      setImportStatus({
+        ok: true,
+        text: `Imported ${loadResult.groups.length} group(s). Save All will update this folder.`,
+      });
+    }
   }
 
   function SortIcon({ k }: { k: SortKey }) {
@@ -253,9 +419,75 @@ export default function TrajectoryGenRight({
   }
 
   const totalTrajectoryCount = groups.reduce((sum, g) => sum + g.trajectories.length, 0);
+  const unsuccessfulCount = groups.reduce(
+    (sum, g) => sum + g.trajectories.filter(isUnsuccessfulTrajectory).length,
+    0
+  );
 
   return (
     <aside className={`${panelAside} border-l border-gray-700`} style={{ width }}>
+
+      {folderImportPrompt && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="bg-gray-900 border border-gray-600 rounded-lg p-4 max-w-sm w-full space-y-3 shadow-xl">
+            <h3 className="text-sm font-semibold text-white">Import trajectory folder?</h3>
+            <p className={`${panelHint} text-gray-400`}>
+              Found {folderImportPrompt.length} group{folderImportPrompt.length !== 1 ? 's' : ''} in the selected folder.
+              You already have trajectories loaded.
+            </p>
+            <div className="flex flex-col gap-2">
+              <button
+                type="button"
+                onClick={() => applyFolderImport(folderImportPrompt, 'replace')}
+                className={`w-full ${panelBtnPrimary} bg-blue-700 hover:bg-blue-600 text-white`}
+              >
+                Replace current trajectories
+              </button>
+              <button
+                type="button"
+                onClick={() => applyFolderImport(folderImportPrompt, 'append')}
+                className={`w-full ${panelBtnPrimary} bg-gray-700 hover:bg-gray-600 text-white`}
+              >
+                Add to current trajectories
+              </button>
+              <button
+                type="button"
+                onClick={() => setFolderImportPrompt(null)}
+                className={`w-full ${panelBtnPrimary} bg-gray-800 hover:bg-gray-700 text-gray-300`}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Title + show all */}
+      <div className="flex-shrink-0 px-4 pt-3 pb-2 border-b border-gray-700">
+        <div className="flex items-center justify-between mb-2">
+          <h2 className={panelSectionTitle}>Trajectories</h2>
+          <span className={`text-sm ${panelMono} bg-blue-900/40 text-blue-300 px-2 py-0.5 rounded-full`}>
+            {totalTrajectoryCount}
+          </span>
+        </div>
+        <div className="space-y-1.5">
+          <CheckboxLabel
+            checked={showAll}
+            disabled={groups.length === 0}
+            onChange={onShowAllChange}
+            label="Show all"
+            labelClassName="text-sm text-gray-400"
+          />
+          <CheckboxLabel
+            checked={showBiggestMoe}
+            disabled={groups.length === 0}
+            onChange={onShowBiggestMoeChange}
+            label="Show biggest MOE"
+            labelClassName="text-sm text-gray-400"
+            color="green"
+          />
+        </div>
+      </div>
 
       {/* Group tabs */}
       <div className="flex-shrink-0 border-b border-gray-700 overflow-x-auto">
@@ -293,30 +525,26 @@ export default function TrajectoryGenRight({
         )}
       </div>
 
-      {/* Group header */}
+      {/* Selected group meta */}
       {group && (
-        <div className="flex-shrink-0 px-4 pt-3 pb-2 border-b border-gray-700">
-          <div className="flex items-center justify-between mb-1">
-            <h2 className={panelSectionTitle}>Trajectories</h2>
-            <span className={`text-sm ${panelMono} bg-blue-900/40 text-blue-300 px-2 py-0.5 rounded-full`}>
-              {trajectories.length}
-            </span>
+        <div className="flex-shrink-0 px-4 py-2 border-b border-gray-700 flex gap-4">
+          <div className="flex items-center gap-1.5">
+            <span className={panelMeta}>Drag</span>
+            <span className={`text-sm ${panelMono} text-gray-400`}>{drag}</span>
           </div>
-          <div className="flex gap-4">
-            <div className="flex items-center gap-1.5">
-              <span className={panelMeta}>Drag</span>
-              <span className={`text-sm ${panelMono} text-gray-400`}>{drag}</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className={panelMeta}>Magnus</span>
-              <span className={`text-sm ${panelMono} text-gray-400`}>{magnus}</span>
-            </div>
+          <div className="flex items-center gap-1.5">
+            <span className={panelMeta}>Magnus</span>
+            <span className={`text-sm ${panelMono} text-gray-400`}>{magnus}</span>
           </div>
+          <span className={`ml-auto text-sm ${panelMono} text-gray-500`}>
+            {trajectories.length} in tab
+          </span>
         </div>
       )}
 
+      <div className="flex flex-col flex-1 min-h-0">
       {group ? (
-        <div className="flex flex-col flex-1 min-h-0">
+        <>
           {/* Table header */}
           <div className={`flex-shrink-0 flex items-center gap-1 px-3 py-2 bg-gray-800/50 text-sm font-medium text-gray-500 border-b border-gray-700/60 select-none`}>
             <button className="flex-1 text-left hover:text-gray-300 transition-colors" onClick={() => handleSort('exitVelocity')}>
@@ -346,6 +574,8 @@ export default function TrajectoryGenRight({
             ) : (
               sorted.map(traj => {
               const isHovered = hoveredTrajId === traj.id;
+              const isMaxMoe = bestMoeTrajIds.has(traj.id);
+              const moe = trajMoeById.get(traj.id);
               const activeVel = activeCell?.id === traj.id && activeCell.field === 'exitVelocity';
               const activeAngle = activeCell?.id === traj.id && activeCell.field === 'exitAngle';
 
@@ -368,6 +598,10 @@ export default function TrajectoryGenRight({
                       ? isHovered
                         ? 'bg-red-900/35 border-b-red-900/60 border-l-2 border-l-red-400'
                         : 'bg-red-950/20 border-b-red-900/40 hover:bg-red-900/25'
+                      : isMaxMoe
+                      ? isHovered
+                        ? 'bg-green-900/40 border-b-gray-800 border-l-2 border-l-green-300'
+                        : 'bg-green-950/30 border-b-gray-800 border-l-2 border-l-green-500'
                       : isHovered
                       ? 'bg-blue-900/40 border-b-gray-800 border-l-2 border-l-blue-400'
                       : 'border-b-gray-800 hover:bg-gray-800/50'
@@ -401,6 +635,11 @@ export default function TrajectoryGenRight({
                       onDoubleClick={e => { e.stopPropagation(); openCell(traj.id, 'exitVelocity', traj.exitVelocity); }}
                     >
                       {traj.exitVelocity.toFixed(3)}
+                      {moe && (
+                        <span className={`text-xs ${isMaxMoe ? 'text-green-400' : 'text-gray-500'}`}>
+                          {' '}±{moe.speedMoe.toFixed(3)}
+                        </span>
+                      )}
                     </span>
                   )}
                   {activeAngle ? (
@@ -426,6 +665,11 @@ export default function TrajectoryGenRight({
                       onDoubleClick={e => { e.stopPropagation(); openCell(traj.id, 'exitAngle', traj.exitAngle); }}
                     >
                       {traj.exitAngle.toFixed(2)}°
+                      {moe && (
+                        <span className={`text-xs ${isMaxMoe ? 'text-green-400' : 'text-gray-500'}`}>
+                          {' '}±{moe.angleMoe.toFixed(2)}°
+                        </span>
+                      )}
                     </span>
                   )}
                   <span className={`flex-1 font-mono ${
@@ -475,9 +719,27 @@ export default function TrajectoryGenRight({
             })
           )}
           </div>
+        </>
+      ) : (
+        <div className={`flex-1 flex items-center justify-center text-gray-600 ${panelEmpty} px-4 min-h-0`}>
+          <p>Generate trajectories to get started.</p>
+        </div>
+      )}
 
-          {/* Bottom controls — natural height only, scrolls if panel is very short */}
-          <div className="flex-shrink-0 p-4 space-y-4 border-t border-gray-700">
+      {/* Bottom controls — always visible */}
+      <div className="flex-shrink-0 p-4 space-y-4 border-t border-gray-700">
+            <div className="space-y-2">
+              <h3 className={panelSectionTitle}>Optimal trajectory</h3>
+              <ErrorToleranceInput
+                value={params.errorTolerance}
+                onChange={(v) => onParamsChange({ ...params, errorTolerance: v })}
+                onRecalculate={onRecalculateMoe}
+                recalcDisabled={groups.length === 0}
+                recalculating={moeRecalculating}
+                recalcProgress={moeRecalcProgress}
+              />
+            </div>
+
             {/* Manage */}
             <div className="space-y-2">
               <h3 className={panelSectionTitle}>Manage</h3>
@@ -493,6 +755,18 @@ export default function TrajectoryGenRight({
                 <XCircle size={14} />
                 Clear All
               </button>
+              <button
+                onClick={onDeleteUnsuccessful}
+                disabled={unsuccessfulCount === 0}
+                className={`w-full ${panelBtnPrimary} ${
+                  unsuccessfulCount === 0
+                    ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
+                    : 'bg-gray-700 hover:bg-gray-600 text-white'
+                }`}
+              >
+                <Trash2 size={14} />
+                Delete Unsuccessful
+              </button>
             </div>
 
             {/* Import / Export */}
@@ -506,21 +780,41 @@ export default function TrajectoryGenRight({
                 onChange={handleImportFile}
               />
               <button
-                onClick={() => { setImportError(null); importInputRef.current?.click(); }}
-                className={`w-full ${panelBtnPrimary} bg-blue-700 hover:bg-blue-600 text-white`}
+                onClick={() => { setImportStatus(null); importInputRef.current?.click(); }}
+                disabled={importing || saving}
+                className={`w-full ${panelBtnPrimary} bg-blue-700 hover:bg-blue-600 text-white disabled:bg-gray-800 disabled:text-gray-500 disabled:cursor-not-allowed`}
               >
                 <Upload size={14} />
-                Import JSON
+                Import Single JSON
               </button>
-              {importError && (
-                <p className="text-sm text-red-400">{importError}</p>
+              <ImportFolderButton
+                label="Import Folder"
+                icon={FolderOpen}
+                disabled={saving}
+                busyRef={importBusyRef}
+                onImportingChange={setImporting}
+                className={`w-full ${panelBtnPrimary} bg-blue-700 hover:bg-blue-600 text-white disabled:bg-gray-800 disabled:text-gray-500 disabled:cursor-not-allowed`}
+                unsupportedMessage="Import Folder requires Chrome or Edge. Your browser does not support folder selection."
+                onBeforeImport={() => {
+                  setImportStatus(null);
+                  return true;
+                }}
+                onBusy={() => setImportStatus({ ok: null, text: 'Import already in progress.' })}
+                onCancel={() => setImportStatus({ ok: null, text: 'Import cancelled.' })}
+                onError={(text) => setImportStatus({ ok: false, text })}
+                onFolderSelected={handleImportTrajFolder}
+              />
+              {importStatus && (
+                <p className={`text-sm ${importStatus.ok === true ? 'text-green-400' : importStatus.ok === false ? 'text-red-400' : 'text-gray-400'}`}>
+                  {importStatus.text}
+                </p>
               )}
               <button
                 type="button"
                 onClick={handleDownload}
-                disabled={totalTrajectoryCount === 0}
+                disabled={totalTrajectoryCount === 0 || saving}
                 className={`w-full ${panelBtnPrimary} ${
-                  totalTrajectoryCount === 0
+                  totalTrajectoryCount === 0 || saving
                     ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
                     : 'bg-green-700 hover:bg-green-600 text-white'
                 }`}
@@ -528,14 +822,22 @@ export default function TrajectoryGenRight({
                 <Download size={14} />
                 Download All Trajectories
               </button>
+              <button
+                type="button"
+                onClick={handleSaveAllClick}
+                disabled={totalTrajectoryCount === 0 || importing || saving}
+                className={`w-full ${panelBtnPrimary} ${
+                  totalTrajectoryCount === 0 || importing || saving
+                    ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
+                    : 'bg-blue-700 hover:bg-blue-600 text-white'
+                }`}
+              >
+                <Save size={14} />
+                {saving ? 'Saving…' : 'Save All Trajectories'}
+              </button>
             </div>
           </div>
-        </div>
-      ) : (
-        <div className={`flex-1 flex items-center justify-center text-gray-600 ${panelEmpty} px-4`}>
-          <p>Generate trajectories to get started.</p>
-        </div>
-      )}
+      </div>
     </aside>
   );
 }
