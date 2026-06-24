@@ -12,6 +12,15 @@ export interface Meterstick {
   length: number; // pixel length representing 1 meter
 }
 
+export type SysIdSidebarTab = 'uploadSave' | 'annotation';
+
+export interface MeterstickPoint {
+  x: number;
+  y: number;
+}
+
+export type MeterstickClipboard = { points: MeterstickPoint[]; segmentMeters: number[] };
+
 export interface LaunchParams {
   exitVelocity: number; // m/s
   exitAngle: number; // degrees from horizontal
@@ -25,7 +34,12 @@ export interface VideoData {
   name: string;
   url: string;
   trajectory: TrajectoryPoint[];
+  /** Legacy summary; kept in sync with first meterstick segment for old configs. */
   meterstick: Meterstick;
+  /** Horizontal meterstick vertices; consecutive pairs define scale segments. */
+  meterstickPoints: MeterstickPoint[];
+  /** Physical length (m) for each segment between consecutive points; length = points.length - 1. */
+  meterstickSegmentMeters: number[];
   trajectoryLaunchParams: Record<string, LaunchParams>;
   showSimulation: boolean;
   currentFrame: number;
@@ -61,7 +75,7 @@ export interface TrajGenParams {
   dxMin: number; // range slider min
   dxMax: number; // range slider max
   dxStep: number; // step between distances
-  goalWidth: number; // meters
+  errorTolerance: number; // meters, horizontal acceptance zone at goal height
   exitAngleMin: number;
   exitAngleMax: number;
   angleStep: number;

@@ -20,6 +20,7 @@ interface Props {
   onUpdateGroup: (groupId: string, trajs: GeneratedTrajectory[]) => void;
   onBatchUpdateGroups: (updates: { groupId: string; trajectories: GeneratedTrajectory[] }[]) => void;
   onImportGroup: (group: TrajGroup) => void;
+  onClearAll: () => void;
   params: TrajGenParams;
   width: number;
 }
@@ -65,7 +66,7 @@ function FreeNumInput({ value, min, max, onChange, className }: {
 export default function TrajectoryGenRight({
   groups, selectedGroupId, selectedTrajId, hoveredTrajId,
   onSelectGroup, onSelectTraj, onHoverTraj,
-  onDeleteTraj, onDeleteGroup, onUpdateGroup, onBatchUpdateGroups, onImportGroup,
+  onDeleteTraj, onDeleteGroup, onUpdateGroup, onBatchUpdateGroups, onImportGroup, onClearAll,
   params, width
 }: Props) {
   const group = groups.find(g => g.id === selectedGroupId) ?? groups[0] ?? null;
@@ -163,8 +164,8 @@ export default function TrajectoryGenRight({
         if (!result.successfulBracket) {
           refined = withImpact;
         } else {
-          const landing = simulateLanding(t.exitVelocity, t.exitAngle, d, m, dx, dy);
-          const inGoal = landing !== null && Math.abs(landing.landingY - dy) <= p.goalWidth / 2;
+          const landing = simulateLanding(t.exitVelocity, t.exitAngle, d, m, dy);
+          const inGoal = landing !== null && Math.abs(landing.landingX - dx) <= p.errorTolerance / 2;
           refined = { ...withImpact, successfulBracket: inGoal, accurate: result.accurate };
         }
         onUpdateGroup(g.id, trajectoriesRef.current.map(tr => tr.id === id ? refined : tr));
@@ -216,10 +217,11 @@ export default function TrajectoryGenRight({
       onUpdateGroup(group.id, trajectories.map(t => {
         if (t.id !== cell.id) return t;
         const next = { ...t, [cell.field]: n };
-        const landing = simulateLanding(next.exitVelocity, next.exitAngle, drag, magnus, group.dx, group.dy);
+        const landing = simulateLanding(next.exitVelocity, next.exitAngle, drag, magnus, group.dy);
         const impact = simulateImpactAngle(next.exitVelocity, next.exitAngle, drag, magnus, group.dx);
         return {
           ...next,
+          landingX: group.dx,
           timeOfFlight: landing ? landing.timeOfFlight : t.timeOfFlight,
           impactAngle: impact !== null ? Math.round(impact * 100) / 100 : t.impactAngle,
         };
@@ -229,8 +231,8 @@ export default function TrajectoryGenRight({
   }
 
   const withLandingError = group ? trajectories.map(t => {
-    const landing = simulateLanding(t.exitVelocity, t.exitAngle, drag, magnus, group.dx, group.dy);
-    const landingError = landing !== null ? (landing.landingY - group.dy) * 1000 : null;
+    const landing = simulateLanding(t.exitVelocity, t.exitAngle, drag, magnus, group.dy);
+    const landingError = landing !== null ? (landing.landingX - group.dx) * 1000 : null;
     return { ...t, landingError };
   }) : [];
 
@@ -263,7 +265,7 @@ export default function TrajectoryGenRight({
 
   function handleAddManual() {
     if (!group) return;
-    const landing = simulateLanding(manualVel, manualAngle, drag, magnus, group.dx, group.dy);
+    const landing = simulateLanding(manualVel, manualAngle, drag, magnus, group.dy);
     const impact = simulateImpactAngle(manualVel, manualAngle, drag, magnus, group.dx);
     const newTraj: GeneratedTrajectory = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -302,8 +304,8 @@ export default function TrajectoryGenRight({
     if (!result.successfulBracket) {
       refined = withImpact;
     } else {
-      const landing = simulateLanding(t.exitVelocity, t.exitAngle, drag, magnus, group.dx, group.dy);
-      const inGoal = landing !== null && Math.abs(landing.landingY - group.dy) <= params.goalWidth / 2;
+      const landing = simulateLanding(t.exitVelocity, t.exitAngle, drag, magnus, group.dy);
+      const inGoal = landing !== null && Math.abs(landing.landingX - group.dx) <= params.errorTolerance / 2;
       refined = { ...withImpact, successfulBracket: inGoal, accurate: result.accurate };
     }
     onUpdateGroup(group.id, trajectories.map(tr => tr.id === id ? refined : tr));
@@ -727,22 +729,10 @@ export default function TrajectoryGenRight({
             <div className="space-y-2">
               <h3 className={panelSectionTitle}>Manage</h3>
               <button
-                onClick={() => group && onUpdateGroup(group.id, trajectories.filter(t => t.accurate === true))}
-                disabled={trajectories.length === 0}
+                onClick={onClearAll}
+                disabled={groups.length === 0}
                 className={`w-full ${panelBtnPrimary} ${
-                  trajectories.length === 0
-                    ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
-                    : 'bg-gray-700 hover:bg-gray-600 text-white'
-                }`}
-              >
-                <Trash2 size={14} />
-                Delete Unsuccessful
-              </button>
-              <button
-                onClick={() => group && onUpdateGroup(group.id, [])}
-                disabled={trajectories.length === 0}
-                className={`w-full ${panelBtnPrimary} ${
-                  trajectories.length === 0
+                  groups.length === 0
                     ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
                     : 'bg-red-900/60 hover:bg-red-800/70 text-red-300 hover:text-red-200'
                 }`}

@@ -243,8 +243,8 @@ export default function TrajectoryGenLeft({ params, onChange, onGenerate, genera
           )}
           <NumInput label="Height Offset (dy)" unit="m" value={params.dy} step={0.1}
             onChange={(v) => set('dy', v)} />
-          <NumInput label="Goal Width" unit="m" value={params.goalWidth} step={0.05} min={0.05}
-            onChange={(v) => set('goalWidth', Math.max(0.05, v))} />
+          <NumInput label="Error Tolerance" unit="m" value={params.errorTolerance} step={0.05} min={0.05}
+            onChange={(v) => set('errorTolerance', Math.max(0.05, v))} />
           <NumInput label="Drag Coefficient" value={params.dragCoefficient} step={0.01} min={0} max={0.2}
             onChange={(v) => set('dragCoefficient', Math.min(0.2, Math.max(0, v)))} />
           <NumInput label="Magnus Coefficient" value={params.magnusGain} step={0.01} min={-0.3} max={0.3}
@@ -313,7 +313,10 @@ export default function TrajectoryGenLeft({ params, onChange, onGenerate, genera
         {/* Estimated count hint */}
         <p className={`${panelHint} text-center`}>
           {Math.round((params.exitAngleMax - params.exitAngleMin) / params.angleStep + 1) *
-           Math.round((params.velocityMax - params.velocityMin) / params.velocityStep + 1)} combinations × {dxValues.length} distance{dxValues.length !== 1 ? 's' : ''}
+           Math.round((params.velocityMax - params.velocityMin) / params.velocityStep + 1)} angle × velocity combinations
+          {dxValues.length > 0 && (
+            <> → up to {dxValues.length} distance group{dxValues.length !== 1 ? 's' : ''}</>
+          )}
         </p>
       </div>
     </aside>

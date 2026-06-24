@@ -1,8 +1,9 @@
 import { useRef, useState, useEffect, useMemo } from 'react';
-import { Eye, EyeOff, Zap, X } from 'lucide-react';
-import { LaunchParams, TrajectoryPoint, Meterstick } from '../types';
-import { fitDragMagnusAsync, GRAVITY_MS2, SIM_DT, DEFAULT_FIT_GRID_CONFIG, DEFAULT_FIT_TARGET_PARAMS, FitProgress, FitRankEntry, FitTargetParams, computeFitTotalEvals, computeTrajectoryFitCost } from '../simulation';
-import { countPlottedPoints } from '../utils/trajectorySegments';
+import { Eye, EyeOff, Zap, X, Copy } from 'lucide-react';
+import { LaunchParams, TrajectoryPoint } from '../types';
+import { fitDragMagnusAsync, GRAVITY_MS2, SIM_DT, DEFAULT_FIT_GRID_CONFIG, DEFAULT_FIT_TARGET_PARAMS, FitProgress, FitRankEntry, FitTargetParams, computeFitTotalEvals, computeTrajectoryFitCost, type PixelsPerMeterSource } from '../simulation';
+import { countPlottedPoints, plottedPoints } from '../utils/trajectorySegments';
+import { MeterstickScale } from '../utils/meterstickScale';
 import {
   panelAside, panelContent, panelSectionTitle, panelSubsectionTitle, panelLabelInline, panelBody, panelHint,
   panelInputNumeric, panelBtnPrimary,
@@ -13,7 +14,7 @@ interface TrajectoryFitEntry {
   videoId: string;
   points: TrajectoryPoint[];
   launchParams: LaunchParams;
-  pixelsPerMeter: number;
+  pixelsPerMeter: PixelsPerMeterSource;
   framerate: number;
 }
 
@@ -25,7 +26,7 @@ interface Props {
   trajectory: TrajectoryPoint[];
   allTrajectories: TrajectoryFitEntry[];
   allVideosTrajectories: TrajectoryFitEntry[];
-  meterstick: Meterstick;
+  meterstickScale: MeterstickScale;
   framerate: number;
   onLaunchParamsChange: (p: LaunchParams) => void;
   onLaunchParamsChangeForTrajectory: (trajectoryId: string, p: LaunchParams) => void;
@@ -198,6 +199,30 @@ interface FitParamRanges {
   magnusPowerMax: number;
 }
 
+const FIT_VEL_TOLERANCE = 0.75;
+const FIT_ANGLE_TOLERANCE = 1;
+
+function launchSyncedVelAngleRanges(exitVelocity: number, exitAngle: number) {
+  return {
+    velocityMin: Math.max(0, exitVelocity - FIT_VEL_TOLERANCE),
+    velocityMax: Math.min(30, exitVelocity + FIT_VEL_TOLERANCE),
+    angleMin: Math.max(-90, exitAngle - FIT_ANGLE_TOLERANCE),
+    angleMax: Math.min(90, exitAngle + FIT_ANGLE_TOLERANCE),
+  };
+}
+
+function defaultFitRanges(exitVelocity: number, exitAngle: number): FitParamRanges {
+  return {
+    ...launchSyncedVelAngleRanges(exitVelocity, exitAngle),
+    dragMin: DEFAULT_FIT_GRID_CONFIG.dragMin,
+    dragMax: DEFAULT_FIT_GRID_CONFIG.dragMax,
+    magnusMin: DEFAULT_FIT_GRID_CONFIG.magnusMin,
+    magnusMax: DEFAULT_FIT_GRID_CONFIG.magnusMax,
+    magnusPowerMin: DEFAULT_FIT_GRID_CONFIG.magnusPowerMin,
+    magnusPowerMax: DEFAULT_FIT_GRID_CONFIG.magnusPowerMax,
+  };
+}
+
 const DEFAULT_FIT_RANGES: FitParamRanges = {
   velocityMin: DEFAULT_FIT_GRID_CONFIG.velocityMin,
   velocityMax: DEFAULT_FIT_GRID_CONFIG.velocityMax,
@@ -211,6 +236,16 @@ const DEFAULT_FIT_RANGES: FitParamRanges = {
   magnusPowerMax: DEFAULT_FIT_GRID_CONFIG.magnusPowerMax,
 };
 
+function trajectoryPpmAtLaunch(t: TrajectoryFitEntry): number {
+  const launch = plottedPoints(t.points)[0];
+  if (!launch) return 0;
+  return typeof t.pixelsPerMeter === 'number' ? t.pixelsPerMeter : t.pixelsPerMeter(launch.x);
+}
+
+function isTrajectoryFittable(t: TrajectoryFitEntry): boolean {
+  return countPlottedPoints(t.points) >= 3 && trajectoryPpmAtLaunch(t) > 0 && t.framerate > 0;
+}
+
 export default function SimulationControls({
   launchParams,
   activeTrajectoryId,
@@ -219,7 +254,7 @@ export default function SimulationControls({
   trajectory,
   allTrajectories,
   allVideosTrajectories,
-  meterstick,
+  meterstickScale,
   framerate,
   onLaunchParamsChange,
   onLaunchParamsChangeForTrajectory,
@@ -238,13 +273,27 @@ export default function SimulationControls({
   const [fitWholeVideo, setFitWholeVideo] = useState(false);
   const [fitAllVideos, setFitAllVideos] = useState(false);
   const cancelRef = useRef<{ cancelled: boolean } | null>(null);
+  const fitRangesTouchedRef = useRef({ velocity: false, angle: false });
 
-  const fittableTrajectories = allTrajectories.filter(
-    (t) => countPlottedPoints(t.points) >= 3 && t.pixelsPerMeter > 0 && t.framerate > 0
-  );
-  const fittableAllVideosTrajectories = allVideosTrajectories.filter(
-    (t) => countPlottedPoints(t.points) >= 3 && t.pixelsPerMeter > 0 && t.framerate > 0
-  );
+  useEffect(() => {
+    if (activeTrajectoryId === null) return;
+    fitRangesTouchedRef.current = { velocity: false, angle: false };
+    setFitRanges(defaultFitRanges(launchParams.exitVelocity, launchParams.exitAngle));
+  }, [activeTrajectoryId]);
+
+  useEffect(() => {
+    if (activeTrajectoryId === null) return;
+    const touched = fitRangesTouchedRef.current;
+    const synced = launchSyncedVelAngleRanges(launchParams.exitVelocity, launchParams.exitAngle);
+    setFitRanges((prev) => ({
+      ...prev,
+      ...(touched.velocity ? {} : { velocityMin: synced.velocityMin, velocityMax: synced.velocityMax }),
+      ...(touched.angle ? {} : { angleMin: synced.angleMin, angleMax: synced.angleMax }),
+    }));
+  }, [launchParams.exitVelocity, launchParams.exitAngle, activeTrajectoryId]);
+
+  const fittableTrajectories = allTrajectories.filter(isTrajectoryFittable);
+  const fittableAllVideosTrajectories = allVideosTrajectories.filter(isTrajectoryFittable);
   const fitDimensions = (
     (fitTargets.fitExitVelocity ? 1 : 0) +
     (fitTargets.fitExitAngle ? 1 : 0) +
@@ -266,7 +315,7 @@ export default function SimulationControls({
   const videosAvailable = allVideosTrajectories.length > 0;
 
   const trajectoryCosts = useMemo(() => {
-    if (meterstick.length <= 0 || framerate <= 0) {
+    if (!meterstickScale.isCalibrated() || framerate <= 0) {
       return { visible: null as number | null, average: null as number | null };
     }
 
@@ -275,7 +324,7 @@ export default function SimulationControls({
         ? computeTrajectoryFitCost(
             trajectory,
             launchParams,
-            meterstick.length,
+            (x) => meterstickScale.getPixelsPerMeter(x),
             framerate
           )?.meanDistance ?? null
         : null;
@@ -287,7 +336,7 @@ export default function SimulationControls({
         return computeTrajectoryFitCost(
           entry.points,
           params,
-          meterstick.length,
+          entry.pixelsPerMeter,
           framerate
         )?.meanDistance ?? null;
       })
@@ -302,16 +351,46 @@ export default function SimulationControls({
     launchParams,
     activeTrajectoryId,
     fittableTrajectories,
-    meterstick.length,
+    meterstickScale,
     framerate,
   ]);
 
+  function formatFitValue(n: number): string {
+    return n.toFixed(5);
+  }
+
   function formatMeanError(meters: number | null): string {
     if (meters === null || !Number.isFinite(meters)) return '—';
-    return `${(meters * 100).toFixed(1)} cm`;
+    return `${(meters * 100).toFixed(5)} cm`;
+  }
+
+  function formatTopFitsForCopy(fits: FitRankEntry[]): string {
+    const header = ['#', 'Vis err', 'Vel', 'Ang', 'Drag', 'Magn'].join('\t');
+    const rows = fits.map((fit) =>
+      [
+        fit.rank,
+        formatMeanError(fit.visibleMeanDistance),
+        formatFitValue(fit.exitVelocity),
+        formatFitValue(fit.exitAngle),
+        formatFitValue(fit.dragCoefficient),
+        formatFitValue(fit.magnusGain),
+      ].join('\t')
+    );
+    return [header, ...rows].join('\n');
+  }
+
+  async function handleCopyTopFits() {
+    if (topFits.length === 0) return;
+    await navigator.clipboard.writeText(formatTopFitsForCopy(topFits));
   }
 
   function setFitRange(partial: Partial<FitParamRanges>) {
+    if ('velocityMin' in partial || 'velocityMax' in partial) {
+      fitRangesTouchedRef.current.velocity = true;
+    }
+    if ('angleMin' in partial || 'angleMax' in partial) {
+      fitRangesTouchedRef.current.angle = true;
+    }
     setFitRanges((prev) => ({ ...prev, ...partial }));
   }
 
@@ -340,7 +419,7 @@ export default function SimulationControls({
     fitDimensions > 0 &&
     (fitAllVideos
       ? fittableAllVideosTrajectories.length > 0
-      : meterstick.length > 0 && framerate > 0) &&
+      : meterstickScale.isCalibrated() && framerate > 0) &&
     (fitTargets.fitExitVelocity ||
       (fitAllVideos || fitWholeVideo
         ? fitTargetEntries.every((t) => t.launchParams.exitVelocity > 0)
@@ -362,9 +441,7 @@ export default function SimulationControls({
       orderedEntries = fittableAllVideosTrajectories;
       if (
         activeEntry &&
-        countPlottedPoints(activeEntry.points) >= 3 &&
-        activeEntry.pixelsPerMeter > 0 &&
-        activeEntry.framerate > 0
+        isTrajectoryFittable(activeEntry)
       ) {
         orderedEntries = [
           activeEntry,
@@ -699,7 +776,18 @@ export default function SimulationControls({
 
               {topFits.length > 0 && (
                 <div className="space-y-1">
-                  <p className={panelHint}>Top {topFits.length} fits</p>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className={panelHint}>Top {topFits.length} fits</p>
+                    <button
+                      type="button"
+                      onClick={handleCopyTopFits}
+                      className="flex items-center gap-1 px-2 py-1 rounded-md bg-gray-800 hover:bg-gray-700 text-gray-300 text-[11px] transition-colors"
+                      title="Copy fits to clipboard"
+                    >
+                      <Copy size={12} />
+                      Copy
+                    </button>
+                  </div>
                   <div className="max-h-48 overflow-y-auto rounded-lg border border-gray-700">
                     <table className="w-full text-[11px] tabular-nums">
                       <thead className="sticky top-0 bg-gray-900 text-gray-400">
@@ -717,10 +805,10 @@ export default function SimulationControls({
                           <tr key={fit.rank} className="border-t border-gray-800">
                             <td className="px-1.5 py-1 text-left text-gray-400">{fit.rank}</td>
                             <td className="px-1.5 py-1 text-right">{formatMeanError(fit.visibleMeanDistance)}</td>
-                            <td className="px-1.5 py-1 text-right">{fit.exitVelocity}</td>
-                            <td className="px-1.5 py-1 text-right">{fit.exitAngle}</td>
-                            <td className="px-1.5 py-1 text-right">{fit.dragCoefficient}</td>
-                            <td className="px-1.5 py-1 text-right">{fit.magnusGain}</td>
+                            <td className="px-1.5 py-1 text-right">{formatFitValue(fit.exitVelocity)}</td>
+                            <td className="px-1.5 py-1 text-right">{formatFitValue(fit.exitAngle)}</td>
+                            <td className="px-1.5 py-1 text-right">{formatFitValue(fit.dragCoefficient)}</td>
+                            <td className="px-1.5 py-1 text-right">{formatFitValue(fit.magnusGain)}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -758,7 +846,7 @@ export default function SimulationControls({
                     ? 'Need at least one trajectory with 3+ points in this video'
                     : !fitWholeVideo && !fitAllVideos && plottedCount < 3
                     ? `Need ${3 - plottedCount} more plotted point${3 - plottedCount === 1 ? '' : 's'}`
-                    : meterstick.length <= 0
+                    : !meterstickScale.isCalibrated()
                     ? 'Calibrate the meterstick scale first'
                     : framerate <= 0
                     ? 'Set a valid framerate first'
@@ -786,7 +874,7 @@ export default function SimulationControls({
           dt = {SIM_DT * 1000} ms timestep
         </p>
         <p className={panelBody}>
-          Launch point is the first plotted point. Drag the yellow meterstick on the video to calibrate the 1-meter scale.
+          Launch point is the first plotted point. Drag the yellow meterstick on the video — each pair of points spans 1 m. Right-click to add/remove points.
         </p>
       </div>
       </div>

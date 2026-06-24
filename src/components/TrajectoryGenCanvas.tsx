@@ -129,7 +129,7 @@ export default function TrajectoryGenCanvas({ params, groups, selectedGroupId, s
       const isSelected = selectedGroup ? Math.abs(selectedGroup.dx - dx) < 1e-6 : false;
       if (isSelected) continue;
       const dy = params.dy;
-      const halfGoal = params.goalWidth / 2;
+      const halfGoal = params.errorTolerance / 2;
       const [gxGoal, gyGoal] = toS(dx, dy);
       const [gxLeft] = toS(dx - halfGoal, dy);
       const [gxRight] = toS(dx + halfGoal, dy);
@@ -219,7 +219,7 @@ export default function TrajectoryGenCanvas({ params, groups, selectedGroupId, s
     // Active goal (selected group dx/dy, or fallback to first dxValue)
     const activeDx = selectedGroup ? selectedGroup.dx : (dxValues[0] ?? params.dxMin);
     const activeDy = params.dy;
-    const halfGoal = params.goalWidth / 2;
+    const halfGoal = params.errorTolerance / 2;
     const [gxGoal, gyGoal] = toS(activeDx, activeDy);
     const [gxLeft] = toS(activeDx - halfGoal, activeDy);
     const [gxRight] = toS(activeDx + halfGoal, activeDy);

@@ -1,4 +1,5 @@
-import { TrajectoryPoint, LaunchParams, Meterstick, VideoData } from '../types';
+import { TrajectoryPoint, LaunchParams, Meterstick, MeterstickPoint, VideoData } from '../types';
+import { defaultMeterstickPoints, horizontalizeMeterstickPoints, meterstickFromPoints, normalizeSegmentMeters } from './meterstickScale';
 
 export const DEFAULT_LAUNCH_PARAMS: LaunchParams = {
   exitVelocity: 8,
@@ -230,6 +231,8 @@ export interface ConfigurationSaveFile {
   version: 2;
   videoName: string;
   meterstick: Meterstick;
+  meterstickPoints?: MeterstickPoint[];
+  meterstickSegmentMeters?: number[];
   trajectories: {
     name: string;
     points: TrajectoryPoint[];
@@ -244,17 +247,23 @@ export interface ConfigurationSaveFile {
 export interface LoadedConfiguration {
   points: TrajectoryPoint[];
   meterstick?: Meterstick;
+  meterstickPoints?: MeterstickPoint[];
+  meterstickSegmentMeters?: number[];
   trajectoryLaunchParams?: Record<string, LaunchParams>;
 }
 
 export function videoToConfigurationSaveFile(
-  video: Pick<VideoData, 'name' | 'trajectory' | 'meterstick' | 'trajectoryLaunchParams'>
+  video: Pick<VideoData, 'name' | 'trajectory' | 'meterstick' | 'meterstickPoints' | 'meterstickSegmentMeters' | 'trajectoryLaunchParams'>
 ): ConfigurationSaveFile {
   const segments = buildTrajectorySegments(video.trajectory);
+  const points = horizontalizeMeterstickPoints(video.meterstickPoints);
+  const segmentMeters = normalizeSegmentMeters(points.length, video.meterstickSegmentMeters);
   return {
     version: 2,
     videoName: video.name,
-    meterstick: video.meterstick,
+    meterstick: meterstickFromPoints(points, segmentMeters),
+    meterstickPoints: points,
+    meterstickSegmentMeters: segmentMeters,
     trajectories: segments.map((s) => {
       const p = getLaunchParams(video.trajectoryLaunchParams, s.id);
       return {
@@ -288,7 +297,21 @@ function configurationSaveFileToLoaded(data: ConfigurationSaveFile): LoadedConfi
       magnusPower: saved.magnusPower ?? DEFAULT_LAUNCH_PARAMS.magnusPower,
     };
   }
-  return { points, meterstick: data.meterstick, trajectoryLaunchParams };
+  const meterstickPts = data.meterstickPoints && data.meterstickPoints.length >= 2
+    ? horizontalizeMeterstickPoints(data.meterstickPoints)
+    : data.meterstick
+      ? defaultMeterstickPoints(data.meterstick)
+      : undefined;
+  const segmentMeters = meterstickPts
+    ? normalizeSegmentMeters(meterstickPts.length, data.meterstickSegmentMeters)
+    : undefined;
+  return {
+    points,
+    meterstick: meterstickPts ? meterstickFromPoints(meterstickPts, segmentMeters) : data.meterstick,
+    meterstickPoints: meterstickPts,
+    meterstickSegmentMeters: segmentMeters,
+    trajectoryLaunchParams,
+  };
 }
 
 export function parseConfigurationFile(text: string): LoadedConfiguration | null {

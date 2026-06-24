@@ -1,15 +1,16 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
-import { ChevronLeft, ChevronRight } from 'lucide-react';
-import { VideoData, TrajectoryPoint, Meterstick, LaunchParams, GeneratedTrajectory, TrajGenParams, TrajGroup } from './types';
+import { ChevronLeft, ChevronRight, Upload, FolderDown } from 'lucide-react';
+import { VideoData, TrajectoryPoint, LaunchParams, GeneratedTrajectory, TrajGenParams, TrajGroup, MeterstickPoint, MeterstickClipboard } from './types';
 import SysIdSidebar from './components/SysIdSidebar';
 import VideoDisplay from './components/VideoDisplay';
 import SimulationControls from './components/SimulationControls';
 import TrajectoryGenCanvas from './components/TrajectoryGenCanvas';
 import TrajectoryGenLeft from './components/TrajectoryGenLeft';
 import TrajectoryGenRight from './components/TrajectoryGenRight';
-import { generateTrajectories, refineGroupTrajectories } from './simulation';
+import { generateAndRefineTrajectoryGroups } from './simulation';
 import { buildTrajectorySegments, resolveActiveSegment, getLaunchParams, createSkippedPoint } from './utils/trajectorySegments';
 import type { ImportedProjectEntry } from './utils/projectIO';
+import { MeterstickScale, defaultMeterstickPoints, scaleToPpmFn, horizontalizeMeterstickPoints, meterstickFromPoints, adjustSegmentMetersForPointChange, normalizeSegmentMeters, defaultSegmentMeters } from './utils/meterstickScale';
 
 const LEFT_MIN = 160;
 const LEFT_MAX = 480;
@@ -24,12 +25,17 @@ const MAX_TRAJECTORY_HISTORY = 10;
 type Tab = 'trajgen' | 'sysid';
 
 function makeDefaultVideo(id: string, name: string, url: string): VideoData {
+  const meterstick = { x: 80, y: 680, length: 160 };
+  const meterstickPoints = defaultMeterstickPoints(meterstick);
+  const meterstickSegmentMeters = defaultSegmentMeters(meterstickPoints.length);
   return {
     id,
     name,
     url,
     trajectory: [],
-    meterstick: { x: 80, y: 680, length: 160 },
+    meterstick,
+    meterstickPoints,
+    meterstickSegmentMeters,
     trajectoryLaunchParams: {},
     showSimulation: false,
     currentFrame: 0,
@@ -44,7 +50,7 @@ const DEFAULT_TRAJGEN_PARAMS: TrajGenParams = {
   dxMin: 1,
   dxMax: 5,
   dxStep: 1,
-  goalWidth: 0.4,
+  errorTolerance: 0.4,
   exitAngleMin: 30,
   exitAngleMax: 85,
   angleStep: 1,
@@ -93,7 +99,7 @@ export default function App() {
   const [totalFrames, setTotalFrames] = useState(1);
   const undoStack = useRef<TrajectoryPoint[][]>([]);
   const redoStack = useRef<TrajectoryPoint[][]>([]);
-  const meterstickClipboardRef = useRef<Meterstick | null>(null);
+  const meterstickClipboardRef = useRef<MeterstickClipboard | null>(null);
   const frameHoldRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const currentFrameRef = useRef(0);
   const totalFramesRef = useRef(1);
@@ -118,6 +124,7 @@ export default function App() {
   const rightDragRef = useRef<{ startX: number; startW: number } | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const centerUploadRef = useRef<HTMLInputElement>(null);
+  const importProjectActionRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     function onMove(e: MouseEvent) {
@@ -164,7 +171,8 @@ export default function App() {
   const allVideosTrajectories = useMemo(
     () =>
       videos.flatMap((video) => {
-        const ppm = video.meterstick.length;
+        const scale = MeterstickScale.fromVideo(video);
+        const ppm = scaleToPpmFn(scale);
         const fps = video.framerate;
         return buildTrajectorySegments(video.trajectory).map((seg) => ({
           id: seg.id,
@@ -176,6 +184,11 @@ export default function App() {
         }));
       }),
     [videos]
+  );
+
+  const selectedMeterstickScale = useMemo(
+    () => (selectedVideo ? MeterstickScale.fromVideo(selectedVideo) : null),
+    [selectedVideo]
   );
 
   useEffect(() => {
@@ -282,7 +295,18 @@ export default function App() {
       const video = makeDefaultVideo(id, entry.file.name, url);
       if (entry.config) {
         video.trajectory = entry.config.points;
-        if (entry.config.meterstick) video.meterstick = entry.config.meterstick;
+        if (entry.config.meterstickPoints && entry.config.meterstickPoints.length >= 2) {
+          video.meterstickPoints = horizontalizeMeterstickPoints(entry.config.meterstickPoints);
+          video.meterstickSegmentMeters = normalizeSegmentMeters(
+            video.meterstickPoints.length,
+            entry.config.meterstickSegmentMeters
+          );
+          video.meterstick = meterstickFromPoints(video.meterstickPoints, video.meterstickSegmentMeters);
+        } else if (entry.config.meterstick) {
+          video.meterstick = entry.config.meterstick;
+          video.meterstickPoints = defaultMeterstickPoints(entry.config.meterstick);
+          video.meterstickSegmentMeters = defaultSegmentMeters(video.meterstickPoints.length);
+        }
         if (entry.config.trajectoryLaunchParams) {
           video.trajectoryLaunchParams = entry.config.trajectoryLaunchParams;
         }
@@ -335,10 +359,49 @@ export default function App() {
     ? selectedVideo.currentFrame < totalFrames - 1
     : false;
 
-  const handleMetastickUpdate = useCallback(
-    (m: Meterstick) => {
+  const handleMeterstickPointsUpdate = useCallback(
+    (points: MeterstickPoint[]) => {
+      if (!selectedId || !selectedVideo) return;
+      const flat = horizontalizeMeterstickPoints(points);
+      const segmentMeters = adjustSegmentMetersForPointChange(
+        selectedVideo.meterstickPoints,
+        flat,
+        selectedVideo.meterstickSegmentMeters
+      );
+      updateVideo(selectedId, {
+        meterstickPoints: flat,
+        meterstickSegmentMeters: segmentMeters,
+        meterstick: meterstickFromPoints(flat, segmentMeters),
+      });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selectedId, selectedVideo]
+  );
+
+  const handleMeterstickSegmentMetersUpdate = useCallback(
+    (segmentMeters: number[]) => {
+      if (!selectedId || !selectedVideo) return;
+      const flat = horizontalizeMeterstickPoints(selectedVideo.meterstickPoints);
+      const normalized = normalizeSegmentMeters(flat.length, segmentMeters);
+      updateVideo(selectedId, {
+        meterstickSegmentMeters: normalized,
+        meterstick: meterstickFromPoints(flat, normalized),
+      });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selectedId, selectedVideo]
+  );
+
+  const handleMeterstickPaste = useCallback(
+    (clip: MeterstickClipboard) => {
       if (!selectedId) return;
-      updateVideo(selectedId, { meterstick: m });
+      const flat = horizontalizeMeterstickPoints(clip.points);
+      const segmentMeters = normalizeSegmentMeters(flat.length, clip.segmentMeters);
+      updateVideo(selectedId, {
+        meterstickPoints: flat,
+        meterstickSegmentMeters: segmentMeters,
+        meterstick: meterstickFromPoints(flat, segmentMeters),
+      });
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [selectedId]
@@ -405,35 +468,20 @@ export default function App() {
     );
   }, [selectedId]);
 
+  function handleClearAll() {
+    setTrajGroups([]);
+    setSelectedGroupId(null);
+    setSelectedTrajId(null);
+  }
+
   function handleGenerate() {
     const drag = trajGenParams.dragCoefficient;
     const magnus = trajGenParams.magnusGain;
-    const dy = trajGenParams.dy;
     setGenerating(true);
     setTimeout(() => {
-      const newGroups: TrajGroup[] = [];
-      // Enumerate all dx values in [dxMin, dxMax] by dxStep
-      let dx = trajGenParams.dxMin;
-      while (dx <= trajGenParams.dxMax + 1e-9) {
-        const roundedDx = Math.round(dx * 1e6) / 1e6;
-        const paramsForDx = { ...trajGenParams, dx: roundedDx };
-        const results = generateTrajectories(paramsForDx, drag, magnus);
-        const groupId = `${roundedDx.toFixed(6)}-${dy.toFixed(6)}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        const group: TrajGroup = { id: groupId, dx: roundedDx, dy, drag, magnus, trajectories: results };
-        const refined = refineGroupTrajectories(
-          group,
-          paramsForDx,
-          trajGenParams.refineMaxIter,
-          trajGenParams.refineThreshold,
-          'angle'
-        );
-        newGroups.push({ ...group, trajectories: refined });
-        dx = Math.round((dx + trajGenParams.dxStep) * 1e6) / 1e6;
-      }
-      setTrajGroups(prev => {
-        const next = [...prev, ...newGroups];
-        return next;
-      });
+      handleClearAll();
+      const newGroups = generateAndRefineTrajectoryGroups(trajGenParams, drag, magnus);
+      setTrajGroups(newGroups);
       if (newGroups.length > 0) {
         setSelectedGroupId(newGroups[0].id);
         setSelectedTrajId(newGroups[0].trajectories.length > 0 ? newGroups[0].trajectories[0].id : null);
@@ -544,6 +592,8 @@ export default function App() {
                 canSkipFrame={canSkipFrame}
                 onSkipFrame={handleSkipFrame}
                 onImportProject={handleImportProject}
+                importProjectActionRef={importProjectActionRef}
+                onLaunchParamsChangeForTrajectory={handleLaunchParamsChange}
               />
             </div>
 
@@ -573,7 +623,14 @@ export default function App() {
                   key={selectedVideo.id}
                   video={selectedVideo}
                   onTrajectoryUpdate={handleTrajectoryUpdate}
-                  onMetastickUpdate={handleMetastickUpdate}
+                  onMeterstickPointsUpdate={handleMeterstickPointsUpdate}
+                  onMeterstickSegmentMetersUpdate={handleMeterstickSegmentMetersUpdate}
+                  onMeterstickPaste={handleMeterstickPaste}
+                  meterstickScale={selectedMeterstickScale ?? MeterstickScale.fromVideo({
+                    meterstick: { x: 80, y: 680, length: 160 },
+                    meterstickPoints: defaultMeterstickPoints({ x: 80, y: 680, length: 160 }),
+                    meterstickSegmentMeters: [1],
+                  })}
                   meterstickClipboardRef={meterstickClipboardRef}
                   onFrameChange={handleFrameChange}
                   onTotalFramesChange={setTotalFrames}
@@ -591,7 +648,7 @@ export default function App() {
                   onStopFrameHold={handleStopFrameHold}
                 />
               ) : (
-                <>
+                <div className="flex-1 flex flex-col items-center justify-center gap-10">
                   <input
                     ref={centerUploadRef}
                     type="file"
@@ -600,18 +657,29 @@ export default function App() {
                     className="hidden"
                     onChange={(e) => { if (e.target.files?.length) { handleUpload(e.target.files); e.target.value = ''; } }}
                   />
-                  <button
-                    onClick={() => centerUploadRef.current?.click()}
-                    className="flex-1 flex flex-col items-center justify-center gap-4 text-gray-600 hover:text-gray-400 transition-colors group"
-                  >
-                    <div className="w-16 h-16 rounded-full bg-gray-800 group-hover:bg-gray-700 transition-colors flex items-center justify-center">
-                      <svg width="32" height="32" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
-                      </svg>
-                    </div>
-                    <p className="text-sm font-medium">Upload a video to get started</p>
-                  </button>
-                </>
+                  <div className="flex flex-col items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => centerUploadRef.current?.click()}
+                      className="w-16 h-16 rounded-full bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-300 transition-colors flex items-center justify-center"
+                      title="Upload video"
+                    >
+                      <Upload size={32} strokeWidth={1.5} />
+                    </button>
+                    <p className="text-sm font-medium text-gray-500">Upload a video to get started</p>
+                  </div>
+                  <div className="flex flex-col items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => importProjectActionRef.current?.()}
+                      className="w-16 h-16 rounded-full bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-300 transition-colors flex items-center justify-center"
+                      title="Import project"
+                    >
+                      <FolderDown size={32} strokeWidth={1.5} />
+                    </button>
+                    <p className="text-sm font-medium text-gray-500">Or import a project</p>
+                  </div>
+                </div>
               )}
             </main>
 
@@ -651,11 +719,11 @@ export default function App() {
                     videoId: selectedVideo.id,
                     points: seg.points,
                     launchParams: getLaunchParams(selectedVideo.trajectoryLaunchParams, seg.id),
-                    pixelsPerMeter: selectedVideo.meterstick.length,
+                    pixelsPerMeter: scaleToPpmFn(MeterstickScale.fromVideo(selectedVideo)),
                     framerate: selectedVideo.framerate,
                   }))}
                   allVideosTrajectories={allVideosTrajectories}
-                  meterstick={selectedVideo.meterstick}
+                  meterstickScale={selectedMeterstickScale ?? MeterstickScale.fromVideo(selectedVideo)}
                   framerate={selectedVideo.framerate}
                   onLaunchParamsChange={(p) => {
                     if (activeSegment) handleLaunchParamsChange(activeSegment.id, p);
@@ -762,6 +830,7 @@ export default function App() {
                   setSelectedGroupId(group.id);
                   setSelectedTrajId(group.trajectories.length > 0 ? group.trajectories[0].id : null);
                 }}
+                onClearAll={handleClearAll}
                 params={trajGenParams}
                 width={rightWidth}
               />

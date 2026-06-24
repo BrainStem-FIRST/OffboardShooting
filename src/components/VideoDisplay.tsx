@@ -1,14 +1,27 @@
 import { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
-import { VideoData, TrajectoryPoint, Meterstick } from '../types';
+import { VideoData, TrajectoryPoint, MeterstickPoint, MeterstickClipboard } from '../types';
 import { simulateShot, gravityCorrectedPoints, interpSimAtTime, SIM_MAX_TIME, SIM_DT } from '../simulation';
 import { buildTrajectorySegments, activeSegmentAtFrame, resolveActiveSegment, firstTrajectoryPoint, averageTrajectoryFromSegments, getLaunchParams, plottedPathSegments, plottedPoints, isSkippedPoint } from '../utils/trajectorySegments';
+import { MeterstickScale, scaleToPpmFn, formatSegmentMetersLabel, parseSegmentMetersInput } from '../utils/meterstickScale';
+import {
+  hitMultiMeterstick,
+  isNearMeterstick,
+  insertPointOnSegment,
+  deleteMeterstickPoint,
+  translateMeterstickPoints,
+  moveMeterstickPointX,
+  hitSegmentLabel,
+} from '../utils/meterstickCanvas';
 
 interface Props {
   video: VideoData;
   onTrajectoryUpdate: (points: TrajectoryPoint[]) => void;
-  onMetastickUpdate: (m: Meterstick) => void;
-  meterstickClipboardRef: React.MutableRefObject<Meterstick | null>;
+  onMeterstickPointsUpdate: (points: MeterstickPoint[]) => void;
+  onMeterstickSegmentMetersUpdate: (segmentMeters: number[]) => void;
+  onMeterstickPaste: (clip: MeterstickClipboard) => void;
+  meterstickScale: MeterstickScale;
+  meterstickClipboardRef: React.MutableRefObject<MeterstickClipboard | null>;
   onFrameChange: (frame: number) => void;
   onTotalFramesChange: (total: number) => void;
   plottingMode: boolean;
@@ -73,7 +86,10 @@ function scrubSegmentStyle(frameStart: number, frameEnd: number, totalFrames: nu
 export default function VideoDisplay({
   video,
   onTrajectoryUpdate,
-  onMetastickUpdate,
+  onMeterstickPointsUpdate,
+  onMeterstickSegmentMetersUpdate,
+  onMeterstickPaste,
+  meterstickScale,
   meterstickClipboardRef,
   onFrameChange,
   onTotalFramesChange,
@@ -96,10 +112,32 @@ export default function VideoDisplay({
 
   const [duration, setDuration] = useState(0);
   const [fps] = useState(30);
-  const [hoveredZone, setHoveredZone] = useState<null | 'left' | 'right' | 'body'>(null);
-  const [draggingZone, setDraggingZone] = useState<null | 'left' | 'right' | 'body'>(null);
   const [stickSelected, setStickSelected] = useState(false);
-  const dragStartRef = useRef<{ mx: number; my: number; stickSnap: Meterstick } | null>(null);
+  const [multiDragging, setMultiDragging] = useState(false);
+  const [hoverCanvasPos, setHoverCanvasPos] = useState<{ x: number; y: number } | null>(null);
+  const [meterstickHovered, setMeterstickHovered] = useState(false);
+  const [editingSegment, setEditingSegment] = useState<{
+    index: number;
+    screenX: number;
+    screenY: number;
+    value: string;
+  } | null>(null);
+  const segmentInputRef = useRef<HTMLInputElement>(null);
+  const [contextMenu, setContextMenu] = useState<{
+    screenX: number;
+    screenY: number;
+    canvasX: number;
+    canvasY: number;
+    pointIndex: number | null;
+    segmentIndex: number | null;
+  } | null>(null);
+  const multiDragRef = useRef<{
+    kind: 'point' | 'body';
+    pointIndex?: number;
+    mx: number;
+    my: number;
+    pointsSnap: MeterstickPoint[];
+  } | null>(null);
   const panDragRef = useRef<{ startX: number; startY: number; panX: number; panY: number } | null>(null);
   const didPanRef = useRef(false);
   const scrubTrackRef = useRef<HTMLDivElement>(null);
@@ -158,7 +196,12 @@ export default function VideoDisplay({
     setZoom(1);
     setPan({ x: 0, y: 0 });
     setStickSelected(false);
+    setContextMenu(null);
   }, [video.id]);
+
+  function nearMeterstick(mx: number, my: number): boolean {
+    return isNearMeterstick(mx, my, video.meterstickPoints);
+  }
 
   useEffect(() => {
     const el = containerRef.current;
@@ -249,6 +292,15 @@ export default function VideoDisplay({
     return { x: (cx - rect.left) * scaleX, y: (cy - rect.top) * scaleY };
   }
 
+  function canvasToClient(cx: number, cy: number): { x: number; y: number } {
+    const canvas = canvasRef.current;
+    if (!canvas) return { x: 0, y: 0 };
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = rect.width / canvas.width;
+    const scaleY = rect.height / canvas.height;
+    return { x: rect.left + cx * scaleX, y: rect.top + cy * scaleY };
+  }
+
   function syncCanvasToVideo() {
     const vid = videoRef.current;
     const canvas = canvasRef.current;
@@ -271,15 +323,6 @@ export default function VideoDisplay({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [duration]);
 
-  function hitStick(mx: number, my: number): 'left' | 'right' | 'body' | null {
-    const s = video.meterstick;
-    if (Math.abs(my - s.y) > 22) return null;
-    if (Math.abs(mx - s.x) < 14) return 'left';
-    if (Math.abs(mx - (s.x + s.length)) < 14) return 'right';
-    if (mx >= s.x && mx <= s.x + s.length) return 'body';
-    return null;
-  }
-
   function startPanDrag(clientX: number, clientY: number) {
     panDragRef.current = {
       startX: clientX,
@@ -291,14 +334,39 @@ export default function VideoDisplay({
     setIsPanning(true);
   }
 
+  function beginMultiDrag(hit: ReturnType<typeof hitMultiMeterstick>, mx: number, my: number) {
+    if (hit.kind === 'point') {
+      multiDragRef.current = {
+        kind: 'point',
+        pointIndex: hit.pointIndex!,
+        mx,
+        my,
+        pointsSnap: video.meterstickPoints.map((p) => ({ ...p })),
+      };
+    } else if (hit.kind === 'segment') {
+      multiDragRef.current = {
+        kind: 'body',
+        mx,
+        my,
+        pointsSnap: video.meterstickPoints.map((p) => ({ ...p })),
+      };
+    }
+    setMultiDragging(true);
+  }
+
   function handleCanvasClick(e: React.MouseEvent) {
-    if (draggingZone || didPanRef.current) {
+    if (contextMenu) {
+      setContextMenu(null);
+      return;
+    }
+    if (multiDragging || didPanRef.current) {
       didPanRef.current = false;
       return;
     }
     const pos = clientToCanvas(e.clientX, e.clientY);
     if (!plottingMode) {
-      setStickSelected(hitStick(pos.x, pos.y) !== null);
+      const hit = hitMultiMeterstick(pos.x, pos.y, video.meterstickPoints);
+      setStickSelected(hit.kind !== 'none');
       return;
     }
     onPushUndo(video.trajectory);
@@ -309,25 +377,116 @@ export default function VideoDisplay({
   }
 
   function handleCanvasMouseMove(e: React.MouseEvent) {
-    if (draggingZone) return;
+    if (multiDragRef.current) return;
     const pos = clientToCanvas(e.clientX, e.clientY);
-    setHoveredZone(hitStick(pos.x, pos.y));
+    setHoverCanvasPos(pos);
+    setMeterstickHovered(nearMeterstick(pos.x, pos.y));
   }
 
   function handleCanvasMouseLeave() {
-    if (!draggingZone) setHoveredZone(null);
+    if (!multiDragRef.current) {
+      setMeterstickHovered(false);
+      setHoverCanvasPos(null);
+    }
   }
 
+  function handleCanvasContextMenu(e: React.MouseEvent) {
+    if (plottingMode) return;
+    const pos = clientToCanvas(e.clientX, e.clientY);
+    const hit = hitMultiMeterstick(pos.x, pos.y, video.meterstickPoints);
+    if (hit.kind === 'none') return;
+    e.preventDefault();
+    setContextMenu({
+      screenX: e.clientX,
+      screenY: e.clientY,
+      canvasX: hit.projectedX,
+      canvasY: hit.projectedY,
+      pointIndex: hit.pointIndex,
+      segmentIndex: hit.segmentIndex,
+    });
+  }
+
+  function handleAddMeterstickPoint() {
+    if (!contextMenu) return;
+    if (contextMenu.segmentIndex !== null) {
+      onMeterstickPointsUpdate(
+        insertPointOnSegment(
+          video.meterstickPoints,
+          contextMenu.segmentIndex,
+          contextMenu.canvasX,
+          contextMenu.canvasY
+        )
+      );
+    }
+    setContextMenu(null);
+    setStickSelected(true);
+  }
+
+  function handleDeleteMeterstickPoint() {
+    if (!contextMenu || contextMenu.pointIndex === null) return;
+    onMeterstickPointsUpdate(deleteMeterstickPoint(video.meterstickPoints, contextMenu.pointIndex));
+    setContextMenu(null);
+  }
+
+  const commitSegmentEdit = useCallback(
+    (raw?: string) => {
+      if (editingSegment === null) return;
+      const parsed = parseSegmentMetersInput(raw ?? editingSegment.value);
+      if (parsed !== null) {
+        const next = [...video.meterstickSegmentMeters];
+        next[editingSegment.index] = parsed;
+        onMeterstickSegmentMetersUpdate(next);
+      }
+      setEditingSegment(null);
+    },
+    [editingSegment, video.meterstickSegmentMeters, onMeterstickSegmentMetersUpdate]
+  );
+
+  function handleCanvasDoubleClick(e: React.MouseEvent) {
+    if (plottingMode || multiDragging) return;
+    const pos = clientToCanvas(e.clientX, e.clientY);
+    const segIdx = hitSegmentLabel(
+      pos.x,
+      pos.y,
+      video.meterstickPoints,
+      video.meterstickSegmentMeters
+    );
+    if (segIdx === null) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const a = video.meterstickPoints[segIdx];
+    const b = video.meterstickPoints[segIdx + 1];
+    const screen = canvasToClient((a.x + b.x) / 2, a.y - 12);
+    const meters = video.meterstickSegmentMeters[segIdx] ?? 1;
+    setEditingSegment({
+      index: segIdx,
+      screenX: screen.x,
+      screenY: screen.y,
+      value: String(meters),
+    });
+  }
+
+  useEffect(() => {
+    setEditingSegment(null);
+  }, [video.id]);
+
+  useEffect(() => {
+    if (editingSegment && segmentInputRef.current) {
+      segmentInputRef.current.focus();
+      segmentInputRef.current.select();
+    }
+  }, [editingSegment?.index]);
+
   function handleCanvasMouseDown(e: React.MouseEvent) {
+    if (contextMenu) setContextMenu(null);
     if (zoomRef.current > 1) {
       if (!plottingMode) {
         const pos = clientToCanvas(e.clientX, e.clientY);
-        const zone = hitStick(pos.x, pos.y);
-        if (zone) {
+        const hit = hitMultiMeterstick(pos.x, pos.y, video.meterstickPoints);
+        if (hit.kind !== 'none') {
           e.preventDefault();
           setStickSelected(true);
-          setDraggingZone(zone);
-          dragStartRef.current = { mx: pos.x, my: pos.y, stickSnap: { ...video.meterstick } };
+          beginMultiDrag(hit, pos.x, pos.y);
           return;
         }
       }
@@ -337,12 +496,11 @@ export default function VideoDisplay({
     }
     if (plottingMode) return;
     const pos = clientToCanvas(e.clientX, e.clientY);
-    const zone = hitStick(pos.x, pos.y);
-    if (!zone) return;
+    const hit = hitMultiMeterstick(pos.x, pos.y, video.meterstickPoints);
+    if (hit.kind === 'none') return;
     e.preventDefault();
     setStickSelected(true);
-    setDraggingZone(zone);
-    dragStartRef.current = { mx: pos.x, my: pos.y, stickSnap: { ...video.meterstick } };
+    beginMultiDrag(hit, pos.x, pos.y);
   }
 
   const handleWindowMouseMove = useCallback((e: MouseEvent) => {
@@ -358,27 +516,27 @@ export default function VideoDisplay({
       setPan(nextPan);
       return;
     }
-    if (!draggingZone || !dragStartRef.current) return;
-    const pos = clientToCanvas(e.clientX, e.clientY);
-    const { mx, my, stickSnap } = dragStartRef.current;
-    const dx = pos.x - mx;
-    const dy = pos.y - my;
-    if (draggingZone === 'body') {
-      onMetastickUpdate({ ...stickSnap, x: stickSnap.x + dx, y: stickSnap.y + dy });
-    } else if (draggingZone === 'left') {
-      const newLen = stickSnap.length - dx;
-      if (newLen > 20) onMetastickUpdate({ ...stickSnap, x: stickSnap.x + dx, length: newLen });
-    } else if (draggingZone === 'right') {
-      const newLen = stickSnap.length + dx;
-      if (newLen > 20) onMetastickUpdate({ ...stickSnap, length: newLen });
+    if (multiDragRef.current) {
+      const pos = clientToCanvas(e.clientX, e.clientY);
+      const { mx, my, pointsSnap, kind, pointIndex } = multiDragRef.current;
+      const dx = pos.x - mx;
+      const dy = pos.y - my;
+      if (kind === 'point' && pointIndex !== undefined) {
+        onMeterstickPointsUpdate(
+          moveMeterstickPointX(pointsSnap, pointIndex, pointsSnap[pointIndex].x + dx)
+        );
+      } else {
+        onMeterstickPointsUpdate(translateMeterstickPoints(pointsSnap, dx, dy));
+      }
+      return;
     }
-  }, [draggingZone, onMetastickUpdate]);
+  }, [onMeterstickPointsUpdate]);
 
   const handleWindowMouseUp = useCallback(() => {
     panDragRef.current = null;
     setIsPanning(false);
-    setDraggingZone(null);
-    dragStartRef.current = null;
+    multiDragRef.current = null;
+    setMultiDragging(false);
   }, []);
 
   useEffect(() => {
@@ -392,10 +550,10 @@ export default function VideoDisplay({
 
   const fineAdjustCurrentPoint = useCallback(
     (dxCm: number, dyCm: number, pushUndo: boolean) => {
-      const ppm = video.meterstick.length;
-      if (ppm <= 0) return;
       const pt = video.trajectory.find((p) => p.frame === video.currentFrame);
       if (!pt || pt.skipped) return;
+      const ppm = meterstickScale.getPixelsPerMeter(pt.x);
+      if (ppm <= 0) return;
       const pxPerMm = ppm / 1000;
       if (pushUndo) onPushUndo(video.trajectory);
       const updated = video.trajectory.map((p) =>
@@ -405,7 +563,7 @@ export default function VideoDisplay({
       );
       onTrajectoryUpdate(updated);
     },
-    [video, onPushUndo, onTrajectoryUpdate]
+    [video, onPushUndo, onTrajectoryUpdate, meterstickScale]
   );
 
   useEffect(() => {
@@ -428,17 +586,20 @@ export default function VideoDisplay({
       }
       if ((e.ctrlKey || e.metaKey) && key === 'c' && stickSelected) {
         e.preventDefault();
-        meterstickClipboardRef.current = { ...video.meterstick };
+        meterstickClipboardRef.current = {
+          points: video.meterstickPoints.map((p) => ({ ...p })),
+          segmentMeters: [...video.meterstickSegmentMeters],
+        };
       }
       if ((e.ctrlKey || e.metaKey) && key === 'v' && meterstickClipboardRef.current) {
         e.preventDefault();
-        onMetastickUpdate({ ...meterstickClipboardRef.current });
+        onMeterstickPaste(meterstickClipboardRef.current);
         setStickSelected(true);
       }
     }
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [onStepFrame, onUndo, onRedo, onDeleteCurrentPoint, fineAdjustCurrentPoint, stickSelected, video.meterstick, meterstickClipboardRef, onMetastickUpdate]);
+  }, [onStepFrame, onUndo, onRedo, onDeleteCurrentPoint, fineAdjustCurrentPoint, stickSelected, video.meterstickPoints, video.meterstickSegmentMeters, meterstickClipboardRef, onMeterstickPaste]);
 
   const drawRef = useRef<() => void>(() => {});
 
@@ -452,7 +613,8 @@ export default function VideoDisplay({
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     const numPointsForEstimate = Math.max(2, video.empiricalNumPoints ?? 2);
-    const ppm = video.meterstick.length;
+    const ppmSource = scaleToPpmFn(meterstickScale);
+    const scaleReady = meterstickScale.isCalibrated();
 
     for (const seg of visibleSegments) {
       const sorted = [...seg.points].sort((a, b) => a.frame - b.frame);
@@ -487,9 +649,9 @@ export default function VideoDisplay({
       }
 
       const plottedSorted = plottedPoints(sorted);
-      if (ppm > 0 && video.framerate > 0 && plottedSorted.length >= 2) {
+      if (scaleReady && video.framerate > 0 && plottedSorted.length >= 2) {
         const subset = plottedSorted.slice(0, Math.min(numPointsForEstimate, plottedSorted.length));
-        const corrected = gravityCorrectedPoints(subset, ppm, video.framerate);
+        const corrected = gravityCorrectedPoints(subset, ppmSource, video.framerate);
         if (corrected.length >= 2) {
           ctx.beginPath();
           corrected.forEach((pt, i) => { if (i === 0) ctx.moveTo(pt.x, pt.y); else ctx.lineTo(pt.x, pt.y); });
@@ -526,7 +688,8 @@ export default function VideoDisplay({
 
     const { exitVelocity, exitAngle, dragCoefficient, magnusGain, magnusPower } = launchParams;
 
-    if (video.showSimulation && ppm > 0 && launchPoint) {
+    if (video.showSimulation && scaleReady && launchPoint) {
+      const ppmLaunch = meterstickScale.getPixelsPerMeter(launchPoint.x);
       const simPts = simulateShot(
         exitVelocity,
         exitAngle,
@@ -538,8 +701,8 @@ export default function VideoDisplay({
       );
       ctx.beginPath();
       simPts.forEach((sp, i) => {
-        const cx = launchPoint.x + sp.x * ppm;
-        const cy = launchPoint.y - sp.y * ppm;
+        const cx = launchPoint.x + sp.x * ppmLaunch;
+        const cy = launchPoint.y - sp.y * ppmLaunch;
         if (i === 0) ctx.moveTo(cx, cy); else ctx.lineTo(cx, cy);
       });
       ctx.strokeStyle = 'rgba(34,197,94,0.95)';
@@ -552,8 +715,8 @@ export default function VideoDisplay({
         const t = (video.currentFrame - launchPoint.frame) / video.framerate;
         const pos = interpSimAtTime(simPts, t, SIM_DT);
         if (pos) {
-          const mx = launchPoint.x + pos.x * ppm;
-          const my = launchPoint.y - pos.y * ppm;
+          const mx = launchPoint.x + pos.x * ppmLaunch;
+          const my = launchPoint.y - pos.y * ppmLaunch;
           ctx.beginPath();
           ctx.arc(mx, my, 10, 0, Math.PI * 2);
           ctx.fillStyle = 'rgba(34,197,94,0.95)';
@@ -565,44 +728,60 @@ export default function VideoDisplay({
       }
     }
 
-    const s = video.meterstick;
-    const rx = s.x + s.length;
-    const isHovered = hoveredZone !== null || draggingZone !== null;
-    const stickColor = stickSelected ? '#fef08a' : isHovered ? '#fde68a' : '#fbbf24';
-    const stickWidth = stickSelected || isHovered ? 4 : 3;
-    if (stickSelected) {
+    const stickColor = stickSelected ? '#fef08a' : (meterstickHovered || multiDragging) ? '#fde68a' : '#fbbf24';
+    const stickWidth = stickSelected || meterstickHovered || multiDragging ? 4 : 3;
+
+    const pts = video.meterstickPoints;
+    if (pts.length >= 2) {
       ctx.beginPath();
-      ctx.rect(s.x - 6, s.y - 16, s.length + 12, 32);
-      ctx.strokeStyle = 'rgba(254, 240, 138, 0.45)';
-      ctx.lineWidth = 2;
-      ctx.setLineDash([6, 4]);
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }
-    ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(rx, s.y);
-    ctx.strokeStyle = stickColor;
-    ctx.lineWidth = stickWidth; ctx.stroke();
-    const capH = 18;
-    [s.x, rx].forEach((ex) => {
-      ctx.beginPath(); ctx.arc(ex, s.y, 7, 0, Math.PI * 2);
-      ctx.fillStyle = stickColor; ctx.fill();
-      ctx.strokeStyle = 'white'; ctx.lineWidth = 1.5; ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(ex, s.y - capH / 2); ctx.lineTo(ex, s.y + capH / 2);
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
       ctx.strokeStyle = stickColor;
-      ctx.lineWidth = stickWidth; ctx.stroke();
-    });
-    ctx.font = 'bold 13px system-ui, sans-serif';
-    ctx.fillStyle = stickColor;
-    ctx.textAlign = 'center';
-    ctx.shadowColor = 'rgba(0,0,0,0.8)'; ctx.shadowBlur = 3;
-    ctx.fillText('1 m', s.x + s.length / 2, s.y - 12);
-    ctx.shadowBlur = 0;
-  }, [video, hoveredZone, draggingZone, stickSelected, visibleSegments, averagePoints, showTrajectoryPoints, launchPoint, launchParams]);
+      ctx.lineWidth = stickWidth;
+      ctx.stroke();
+      for (let i = 0; i + 1 < pts.length; i++) {
+        const a = pts[i];
+        const b = pts[i + 1];
+        const label = formatSegmentMetersLabel(video.meterstickSegmentMeters[i] ?? 1);
+        ctx.font = 'bold 13px system-ui, sans-serif';
+        ctx.fillStyle = stickColor;
+        ctx.textAlign = 'center';
+        ctx.shadowColor = 'rgba(0,0,0,0.8)'; ctx.shadowBlur = 3;
+        ctx.fillText(label, (a.x + b.x) / 2, a.y - 12);
+        ctx.shadowBlur = 0;
+      }
+      pts.forEach((p) => {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
+        ctx.fillStyle = stickColor;
+        ctx.fill();
+        ctx.strokeStyle = 'white';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      });
+    }
+
+    if (meterstickHovered && hoverCanvasPos && scaleReady) {
+      const hx = hoverCanvasPos.x;
+      const ppm = meterstickScale.getPixelsPerMeter(hx);
+      const labelY = meterstickScale.yAtX(hx);
+      if (labelY !== null) {
+        ctx.font = '12px ui-monospace, monospace';
+        ctx.fillStyle = '#fde68a';
+        ctx.textAlign = 'center';
+        ctx.shadowColor = 'rgba(0,0,0,0.85)';
+        ctx.shadowBlur = 4;
+        ctx.fillText(`${ppm.toFixed(1)} px/m`, hx, labelY + 28);
+        ctx.shadowBlur = 0;
+      }
+    }
+  }, [video, stickSelected, meterstickHovered, multiDragging, hoverCanvasPos, meterstickScale, visibleSegments, averagePoints, showTrajectoryPoints, launchPoint, launchParams]);
 
   useEffect(() => { drawRef.current = draw; draw(); }, [draw]);
 
-  const cursor = (isPanning || draggingZone) ? 'grabbing'
+  const cursor = (isPanning || multiDragging) ? 'grabbing'
     : plottingMode ? 'crosshair'
+    : meterstickHovered ? 'grab'
     : 'default';
 
   return (
@@ -632,8 +811,60 @@ export default function VideoDisplay({
             onMouseMove={handleCanvasMouseMove}
             onMouseLeave={handleCanvasMouseLeave}
             onMouseDown={handleCanvasMouseDown}
+            onDoubleClick={handleCanvasDoubleClick}
+            onContextMenu={handleCanvasContextMenu}
           />
         </div>
+        {editingSegment && (
+          <input
+            ref={segmentInputRef}
+            type="text"
+            className="fixed z-50 px-1.5 py-0.5 text-xs font-bold text-yellow-100 bg-gray-900 border border-yellow-500 rounded shadow-lg outline-none text-center"
+            style={{
+              left: editingSegment.screenX,
+              top: editingSegment.screenY,
+              transform: 'translate(-50%, -50%)',
+              width: '4.5rem',
+            }}
+            value={editingSegment.value}
+            onChange={(e) => setEditingSegment({ ...editingSegment, value: e.target.value })}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                commitSegmentEdit();
+              } else if (e.key === 'Escape') {
+                e.preventDefault();
+                setEditingSegment(null);
+              }
+            }}
+            onBlur={() => commitSegmentEdit()}
+          />
+        )}
+        {contextMenu && (
+          <div
+            className="fixed z-50 min-w-[8rem] bg-gray-900 border border-gray-600 rounded-md shadow-xl py-1 text-sm text-gray-200"
+            style={{ left: contextMenu.screenX, top: contextMenu.screenY }}
+          >
+            {contextMenu.segmentIndex !== null && (
+              <button
+                type="button"
+                className="block w-full text-left px-3 py-1.5 hover:bg-gray-800"
+                onClick={handleAddMeterstickPoint}
+              >
+                Add point
+              </button>
+            )}
+            {contextMenu.pointIndex !== null && video.meterstickPoints.length > 2 && (
+              <button
+                type="button"
+                className="block w-full text-left px-3 py-1.5 hover:bg-gray-800 text-red-300"
+                onClick={handleDeleteMeterstickPoint}
+              >
+                Delete point
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="relative bg-gray-900 border-t border-gray-700 flex-shrink-0 px-4 py-3">

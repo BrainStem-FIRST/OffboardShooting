@@ -1,5 +1,16 @@
 import type { GeneratedTrajectory, TrajGenParams, TrajectoryPoint, TrajGroup } from './types';
 import { isPlottedPoint, plottedPoints } from './utils/trajectorySegments';
+import type { PixelsPerMeterFn } from './utils/meterstickScale';
+
+export type PixelsPerMeterSource = number | PixelsPerMeterFn;
+
+function resolvePpm(source: PixelsPerMeterSource, x: number): number {
+  return typeof source === 'function' ? source(x) : source;
+}
+
+function ppmValid(source: PixelsPerMeterSource, sampleX = 0): boolean {
+  return resolvePpm(source, sampleX) > 0;
+}
 
 export interface SimPoint {
   x: number; // meters from launch
@@ -10,17 +21,18 @@ export interface SimPoint {
 export function speedBetweenPoints(
   p1: TrajectoryPoint,
   p2: TrajectoryPoint,
-  pixelsPerMeter: number,
+  pixelsPerMeter: PixelsPerMeterSource,
   framerate: number
 ): number | null {
   if (!isPlottedPoint(p1) || !isPlottedPoint(p2)) return null;
-  if (pixelsPerMeter <= 0 || framerate <= 0) return null;
+  const ppm = resolvePpm(pixelsPerMeter, (p1.x + p2.x) / 2);
+  if (ppm <= 0 || framerate <= 0) return null;
   const frameDelta = p2.frame - p1.frame;
   if (frameDelta <= 0) return null;
   const dx = p2.x - p1.x;
   const dy = p2.y - p1.y;
   const distPx = Math.sqrt(dx * dx + dy * dy);
-  const distM = distPx / pixelsPerMeter;
+  const distM = distPx / ppm;
   const dt = frameDelta / framerate;
   return distM / dt;
 }
@@ -29,13 +41,14 @@ export function speedBetweenPoints(
 export function angleBetweenPoints(
   p1: TrajectoryPoint,
   p2: TrajectoryPoint,
-  pixelsPerMeter: number
+  pixelsPerMeter: PixelsPerMeterSource
 ): number | null {
   if (!isPlottedPoint(p1) || !isPlottedPoint(p2)) return null;
-  if (pixelsPerMeter <= 0) return null;
+  const ppm = resolvePpm(pixelsPerMeter, (p1.x + p2.x) / 2);
+  if (ppm <= 0) return null;
   if (p2.frame - p1.frame <= 0) return null;
-  const physDx = (p2.x - p1.x) / pixelsPerMeter;
-  const physDy = (p1.y - p2.y) / pixelsPerMeter;
+  const physDx = (p2.x - p1.x) / ppm;
+  const physDy = (p1.y - p2.y) / ppm;
   return Math.atan2(physDy, physDx) * (180 / Math.PI);
 }
 
@@ -51,34 +64,37 @@ export const SIM_DT = 0.005;
  */
 export function gravityCorrectedPoints(
   points: TrajectoryPoint[],
-  pixelsPerMeter: number,
+  pixelsPerMeter: PixelsPerMeterSource,
   framerate: number
 ): TrajectoryPoint[] {
   const plotted = plottedPoints(points);
-  if (plotted.length === 0 || pixelsPerMeter <= 0 || framerate <= 0) return [];
+  if (plotted.length === 0 || !ppmValid(pixelsPerMeter) || framerate <= 0) return [];
   const sorted = [...plotted].sort((a, b) => a.frame - b.frame);
   const frame0 = sorted[0].frame;
   return sorted.map((pt, i) => {
     if (i === 0) return { ...pt };
     const t = (pt.frame - frame0) / framerate;
-    // x = 0.5 * a * t^2
-    const offsetPx = 0.5 * GRAVITY_MS2 * t * t * pixelsPerMeter;
+    const ppm = resolvePpm(pixelsPerMeter, pt.x);
+    const offsetPx = 0.5 * GRAVITY_MS2 * t * t * ppm;
     return { x: pt.x, y: pt.y - offsetPx, frame: pt.frame };
   });
 }
 
-function toPhysicalMeters(points: TrajectoryPoint[], pixelsPerMeter: number): { x: number; y: number }[] {
+function toPhysicalMeters(points: TrajectoryPoint[], pixelsPerMeter: PixelsPerMeterSource): { x: number; y: number }[] {
   if (points.length === 0) return [];
   const p0 = points[0];
-  return points.map((p) => ({
-    x: (p.x - p0.x) / pixelsPerMeter,
-    y: (p0.y - p.y) / pixelsPerMeter,
-  }));
+  return points.map((p) => {
+    const ppm = resolvePpm(pixelsPerMeter, (p.x + p0.x) / 2);
+    return {
+      x: (p.x - p0.x) / ppm,
+      y: (p0.y - p.y) / ppm,
+    };
+  });
 }
 
 /** R² of a linear fit (y ~ x) to points in physical coordinates. 1 = perfectly straight. */
-export function lineFitR2(points: TrajectoryPoint[], pixelsPerMeter: number): number | null {
-  if (points.length < 2 || pixelsPerMeter <= 0) return null;
+export function lineFitR2(points: TrajectoryPoint[], pixelsPerMeter: PixelsPerMeterSource): number | null {
+  if (points.length < 2 || !ppmValid(pixelsPerMeter)) return null;
   const phys = toPhysicalMeters(points, pixelsPerMeter);
   const n = phys.length;
   const xMean = phys.reduce((s, p) => s + p.x, 0) / n;
@@ -130,9 +146,9 @@ function circumradiusMeters(
 /** Mean circumradius over consecutive triplets; larger radius = straighter path. */
 export function averageRadiusOfCurvature(
   points: TrajectoryPoint[],
-  pixelsPerMeter: number
+  pixelsPerMeter: PixelsPerMeterSource
 ): number | null {
-  if (points.length < 3 || pixelsPerMeter <= 0) return null;
+  if (points.length < 3 || !ppmValid(pixelsPerMeter)) return null;
   const phys = toPhysicalMeters(points, pixelsPerMeter);
   const radii: number[] = [];
   for (let i = 0; i < phys.length - 2; i++) {
@@ -151,13 +167,13 @@ export interface GravityCorrectionQuality {
 /** Line-fit quality of gravity-corrected points used for exit estimates. */
 export function gravityCorrectionQuality(
   points: TrajectoryPoint[],
-  pixelsPerMeter: number,
+  pixelsPerMeter: PixelsPerMeterSource,
   framerate: number,
   numPoints: number
 ): GravityCorrectionQuality {
   const sorted = plottedPoints(points).sort((a, b) => a.frame - b.frame);
   const n = Math.max(2, Math.floor(numPoints));
-  if (sorted.length < n || pixelsPerMeter <= 0 || framerate <= 0) {
+  if (sorted.length < n || !ppmValid(pixelsPerMeter) || framerate <= 0) {
     return { r2: null, avgRadiusOfCurvature: null };
   }
   const corrected = gravityCorrectedPoints(
@@ -183,7 +199,7 @@ export function decreasingPairWeights(pairCount: number): number[] {
 /** Estimate exit speed/angle from the first N points using weighted consecutive pairs. */
 export function empiricalFromPoints(
   points: TrajectoryPoint[],
-  pixelsPerMeter: number,
+  pixelsPerMeter: PixelsPerMeterSource,
   framerate: number,
   numPoints: number
 ): { speed: number | null; angle: number | null } {
@@ -314,10 +330,10 @@ export interface FitGridConfig {
 export const DEFAULT_FIT_GRID_CONFIG: FitGridConfig = {
   dragMin: 0,
   dragMax: 0.2,
-  magnusMin: -0.5,
-  magnusMax: 0.5,
+  magnusMin: -0.4,
+  magnusMax: -0.1,
   magnusPowerMin: 1,
-  magnusPowerMax: 3,
+  magnusPowerMax: 1.5,
   velocityMin: 0,
   velocityMax: 30,
   angleMin: -90,
@@ -358,7 +374,7 @@ export interface TrajectoryFitResult {
   topFits: FitRankEntry[];
 }
 
-const TOP_FIT_COUNT = 10;
+const TOP_FIT_COUNT = 500;
 
 /** @deprecated Use TrajectoryFitResult */
 export type DragMagnusFitResult = TrajectoryFitResult;
@@ -417,20 +433,24 @@ function buildGrid(lo: number, hi: number, numSplits: number): number[] {
 
 function preprocessObservations(
   trajectory: TrajectoryPoint[],
-  ppm: number,
+  ppmSource: PixelsPerMeterSource,
   framerate: number
 ): { obs: { t: number; x: number; y: number }[]; simMaxTime: number } | null {
   const sorted = plottedPoints(trajectory).sort((a, b) => a.frame - b.frame);
-  if (sorted.length < 3 || ppm <= 0 || framerate <= 0) return null;
+  if (sorted.length < 3 || !ppmValid(ppmSource) || framerate <= 0) return null;
 
   const launch = sorted[0];
   const frame0 = launch.frame;
-  const obs = sorted.map((p) => ({
-    t: (p.frame - frame0) / framerate,
-    x: (p.x - launch.x) / ppm,
-    y: (launch.y - p.y) / ppm,
-  }));
-  if (obs[obs.length - 1].t <= 0) return null;
+  const obs = sorted.map((p) => {
+    const ppm = resolvePpm(ppmSource, p.x);
+    if (ppm <= 0) return null;
+    return {
+      t: (p.frame - frame0) / framerate,
+      x: (p.x - launch.x) / ppm,
+      y: (launch.y - p.y) / ppm,
+    };
+  }).filter((o): o is { t: number; x: number; y: number } => o !== null);
+  if (obs.length < 3 || obs[obs.length - 1].t <= 0) return null;
 
   return {
     obs,
@@ -445,7 +465,7 @@ export interface FitTrajectoryInput {
   dragCoefficient: number;
   magnusGain: number;
   magnusPower: number;
-  pixelsPerMeter: number;
+  pixelsPerMeter: PixelsPerMeterSource;
   framerate: number;
 }
 
@@ -551,7 +571,7 @@ export function computeTrajectoryFitCost(
     magnusGain: number;
     magnusPower: number;
   },
-  ppm: number,
+  ppm: PixelsPerMeterSource,
   framerate: number
 ): TrajectoryFitCost | null {
   const prepped = preprocessObservations(points, ppm, framerate);
@@ -952,57 +972,95 @@ export function simulateImpactAngle(
   return null;
 }
 
-// Simulate a single shot and return landing info (where y crosses dy)
-// drag and magnus from global sim params passed in
+// Simulate a single shot and return where the trajectory crosses targetDy (goal height).
+// Uses the last forward crossing (descending leg) when the arc passes through dy twice.
 export function simulateLanding(
   exitVelocity: number,
   exitAngleDeg: number,
   drag: number,
   magnus: number,
-  targetDx: number,
   targetDy: number
 ): { landingX: number; landingY: number; timeOfFlight: number } | null {
   const pts = simulateShot(exitVelocity, exitAngleDeg, drag, magnus, SIM_MAX_TIME, SIM_DT);
-  // Find the point where x crosses targetDx
+  let lastCross: { landingX: number; landingY: number; timeOfFlight: number } | null = null;
+
   for (let i = 0; i < pts.length - 1; i++) {
     const a = pts[i];
     const b = pts[i + 1];
-    if (a.x <= targetDx && b.x >= targetDx) {
-      const t2 = (targetDx - a.x) / (b.x - a.x);
-      const y = a.y + t2 * (b.y - a.y);
-      const time = (i + t2) * SIM_DT;
-      return { landingX: targetDx, landingY: y, timeOfFlight: time };
-    }
+    const crosses =
+      (a.y <= targetDy && b.y >= targetDy) || (a.y >= targetDy && b.y <= targetDy);
+    if (!crosses) continue;
+    const dy = b.y - a.y;
+    if (Math.abs(dy) < 1e-12) continue;
+    const t2 = (targetDy - a.y) / dy;
+    if (t2 < 0 || t2 > 1) continue;
+    const x = a.x + t2 * (b.x - a.x);
+    if (x < 0) continue;
+    lastCross = {
+      landingX: x,
+      landingY: targetDy,
+      timeOfFlight: (i + t2) * SIM_DT,
+    };
   }
-  return null;
+
+  return lastCross;
 }
 
-// Generate all valid trajectories that land within the goal and satisfy angle constraints
+export function enumerateDxValues(dxMin: number, dxMax: number, dxStep: number): number[] {
+  const values: number[] = [];
+  let dx = dxMin;
+  while (dx <= dxMax + 1e-9) {
+    values.push(Math.round(dx * 1e6) / 1e6);
+    dx = Math.round((dx + dxStep) * 1e6) / 1e6;
+  }
+  return values;
+}
+
+export function closestIntervalPosition(landingX: number, dxValues: number[]): number {
+  if (dxValues.length === 0) return landingX;
+  let best = dxValues[0];
+  let bestDist = Math.abs(landingX - best);
+  for (const dx of dxValues) {
+    const dist = Math.abs(landingX - dx);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = dx;
+    }
+  }
+  return best;
+}
+
+// Sweep exit velocity and angle once; keep trajectories whose x at goal height
+// falls within [dxMin - errorTolerance, dxMax + errorTolerance].
 export function generateTrajectories(
   params: TrajGenParams,
   drag: number,
   magnus: number
 ): GeneratedTrajectory[] {
   const results: GeneratedTrajectory[] = [];
+  const xMin = params.dxMin - params.errorTolerance;
+  const xMax = params.dxMax + params.errorTolerance;
 
   let vel = params.velocityMin;
   while (vel <= params.velocityMax + 1e-9) {
     let angle = params.exitAngleMin;
     while (angle <= params.exitAngleMax + 1e-9) {
-      const landing = simulateLanding(vel, angle, drag, magnus, params.dx, params.dy);
-      if (landing !== null) {
-        if (Math.abs(landing.landingY - params.dy) <= 0.05) {
-          const impact = simulateImpactAngle(vel, angle, drag, magnus, params.dx);
-          if (impact !== null && impact >= params.impactAngleMin && impact <= params.impactAngleMax) {
-            results.push({
-              id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-              exitVelocity: Math.round(vel * 100) / 100,
-              exitAngle: Math.round(angle * 100) / 100,
-              impactAngle: Math.round(impact * 100) / 100,
-              timeOfFlight: Math.round(landing.timeOfFlight * 1000) / 1000,
-              landingX: params.dx,
-            });
-          }
+      const landing = simulateLanding(vel, angle, drag, magnus, params.dy);
+      if (
+        landing !== null &&
+        landing.landingX >= xMin &&
+        landing.landingX <= xMax
+      ) {
+        const impact = simulateImpactAngle(vel, angle, drag, magnus, landing.landingX);
+        if (impact !== null && impact >= params.impactAngleMin && impact <= params.impactAngleMax) {
+          results.push({
+            id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+            exitVelocity: Math.round(vel * 100) / 100,
+            exitAngle: Math.round(angle * 100) / 100,
+            impactAngle: Math.round(impact * 100) / 100,
+            timeOfFlight: Math.round(landing.timeOfFlight * 1000) / 1000,
+            landingX: Math.round(landing.landingX * 1000) / 1000,
+          });
         }
       }
       angle = Math.round((angle + params.angleStep) * 1e6) / 1e6;
@@ -1013,20 +1071,85 @@ export function generateTrajectories(
   return results;
 }
 
-// Helper: compute landingY for a given search variable, holding the other constant
-function landingY(
+// Generate trajectories once, assign each to the nearest distance interval, refine, and group.
+export function generateAndRefineTrajectoryGroups(
+  params: TrajGenParams,
+  drag: number,
+  magnus: number
+): TrajGroup[] {
+  const dxValues = enumerateDxValues(params.dxMin, params.dxMax, params.dxStep);
+  if (dxValues.length === 0) return [];
+
+  const raw = generateTrajectories(params, drag, magnus);
+  const groupTrajs = new Map<number, GeneratedTrajectory[]>();
+  for (const dx of dxValues) groupTrajs.set(dx, []);
+
+  for (const traj of raw) {
+    const targetDx = closestIntervalPosition(traj.landingX, dxValues);
+    const gParams = { ...params, dx: targetDx };
+    const { trajectory: refined, successfulBracket, accurate } = refineTrajectory(
+      traj,
+      gParams,
+      drag,
+      magnus,
+      params.refineMaxIter,
+      params.refineThreshold,
+      'angle'
+    );
+    const impact = simulateImpactAngle(
+      refined.exitVelocity,
+      refined.exitAngle,
+      drag,
+      magnus,
+      targetDx
+    );
+    const withImpact = {
+      ...refined,
+      impactAngle: impact !== null ? Math.round(impact * 100) / 100 : refined.impactAngle,
+      landingX: targetDx,
+    };
+    const landing = simulateLanding(refined.exitVelocity, refined.exitAngle, drag, magnus, params.dy);
+    const inGoal =
+      successfulBracket &&
+      landing !== null &&
+      Math.abs(landing.landingX - targetDx) <= params.errorTolerance / 2;
+    const finalTraj: GeneratedTrajectory = {
+      ...withImpact,
+      successfulBracket: inGoal,
+      accurate: inGoal && accurate,
+    };
+    groupTrajs.get(targetDx)!.push(finalTraj);
+  }
+
+  const batchId = Date.now();
+  const groups: TrajGroup[] = dxValues.map((dx) => {
+    const trajectories = dedupeTrajectories(groupTrajs.get(dx) ?? []);
+    return {
+      id: `${dx.toFixed(6)}-${params.dy.toFixed(6)}-${batchId}-${Math.random().toString(36).slice(2)}`,
+      dx,
+      dy: params.dy,
+      drag,
+      magnus,
+      trajectories,
+    };
+  });
+
+  return groups.filter((g) => g.trajectories.length > 0);
+}
+
+// Helper: compute landingX at goal height for a given search variable, holding the other constant
+function landingXAtGoalHeight(
   searchVal: number,
   fixed: number,
   constMode: 'velocity' | 'angle',
   drag: number,
   magnus: number,
-  dx: number,
-  dy: number
+  targetDy: number
 ): number | null {
   const v = constMode === 'velocity' ? fixed : searchVal;
   const a = constMode === 'velocity' ? searchVal : fixed;
-  const result = simulateLanding(v, a, drag, magnus, dx, dy);
-  return result ? result.landingY : null;
+  const result = simulateLanding(v, a, drag, magnus, targetDy);
+  return result ? result.landingX : null;
 }
 
 // Refine a single trajectory using binary search.
@@ -1041,39 +1164,45 @@ export function refineTrajectory(
   threshold: number,
   constMode: 'velocity' | 'angle' = 'velocity'
 ): { trajectory: GeneratedTrajectory; successfulBracket: boolean; accurate: boolean } {
-  const target = params.dy;
+  const targetDx = params.dx;
+  const targetDy = params.dy;
   const fixed = constMode === 'velocity' ? traj.exitVelocity : traj.exitAngle;
   const initSearch = constMode === 'velocity' ? traj.exitAngle : traj.exitVelocity;
   const step = constMode === 'velocity' ? 0.5 : 0.05; // degrees or m/s
 
   const err0 = (() => {
-    const y = landingY(initSearch, fixed, constMode, drag, magnus, params.dx, target);
-    return y !== null ? y - target : null;
+    const x = landingXAtGoalHeight(initSearch, fixed, constMode, drag, magnus, targetDy);
+    return x !== null ? x - targetDx : null;
   })();
   if (err0 === null) {
     return { trajectory: { ...traj, successfulBracket: false, accurate: false }, successfulBracket: false, accurate: false };
   }
   if (Math.abs(err0) < threshold) {
-    // Already accurate — no bracket search needed
     const final = simulateLanding(
       constMode === 'velocity' ? fixed : initSearch,
       constMode === 'velocity' ? initSearch : fixed,
-      drag, magnus, params.dx, params.dy
+      drag, magnus, targetDy
     );
     return {
-      trajectory: { ...traj, successfulBracket: true, accurate: true, timeOfFlight: final ? Math.round(final.timeOfFlight * 1000) / 1000 : traj.timeOfFlight },
-      successfulBracket: true, accurate: true,
+      trajectory: {
+        ...traj,
+        landingX: targetDx,
+        successfulBracket: true,
+        accurate: true,
+        timeOfFlight: final ? Math.round(final.timeOfFlight * 1000) / 1000 : traj.timeOfFlight,
+      },
+      successfulBracket: true,
+      accurate: true,
     };
   }
 
-  // Probe one step in each direction, pick the direction that reduces error
   const errPos = (() => {
-    const y = landingY(initSearch + step, fixed, constMode, drag, magnus, params.dx, target);
-    return y !== null ? y - target : null;
+    const x = landingXAtGoalHeight(initSearch + step, fixed, constMode, drag, magnus, targetDy);
+    return x !== null ? x - targetDx : null;
   })();
   const errNeg = (() => {
-    const y = landingY(initSearch - step, fixed, constMode, drag, magnus, params.dx, target);
-    return y !== null ? y - target : null;
+    const x = landingXAtGoalHeight(initSearch - step, fixed, constMode, drag, magnus, targetDy);
+    return x !== null ? x - targetDx : null;
   })();
 
   // Choose direction: prefer the side whose error is smaller in magnitude
@@ -1097,9 +1226,9 @@ export function refineTrajectory(
     a = b;
     errA = errB;
     b = a + dir * step;
-    const y = landingY(b, fixed, constMode, drag, magnus, params.dx, target);
-    if (y === null) break;
-    errB = y - target;
+    const x = landingXAtGoalHeight(b, fixed, constMode, drag, magnus, targetDy);
+    if (x === null) break;
+    errB = x - targetDx;
     if (errA * errB < 0) { found = true; }
   }
 
@@ -1111,47 +1240,46 @@ export function refineTrajectory(
   // Ensure lo < hi
   let lo = Math.min(a, b);
   let hi = Math.max(a, b);
-  let yLo = landingY(lo, fixed, constMode, drag, magnus, params.dx, target);
-  let yHi = landingY(hi, fixed, constMode, drag, magnus, params.dx, target);
-  if (yLo === null || yHi === null) {
+  let xLo = landingXAtGoalHeight(lo, fixed, constMode, drag, magnus, targetDy);
+  let xHi = landingXAtGoalHeight(hi, fixed, constMode, drag, magnus, targetDy);
+  if (xLo === null || xHi === null) {
     return { trajectory: { ...traj, successfulBracket: false, accurate: false }, successfulBracket: false, accurate: false };
   }
 
-  // Binary search within [lo, hi]
   for (let i = 0; i < maxIter; i++) {
     const mid = (lo + hi) / 2;
-    const yMid = landingY(mid, fixed, constMode, drag, magnus, params.dx, target);
-    if (yMid === null) break;
+    const xMid = landingXAtGoalHeight(mid, fixed, constMode, drag, magnus, targetDy);
+    if (xMid === null) break;
 
-    const err = yMid - target;
+    const err = xMid - targetDx;
     if (Math.abs(err) < threshold) {
       lo = mid;
       hi = mid;
       break;
     }
 
-    // Narrow the interval: keep the side whose endpoint is on the opposite side of target from mid
-    if ((yLo! - target) * (err) < 0) {
+    if ((xLo! - targetDx) * err < 0) {
       hi = mid;
-      yHi = yMid;
+      xHi = xMid;
     } else {
       lo = mid;
-      yLo = yMid;
+      xLo = xMid;
     }
   }
 
   const bestSearch = (lo + hi) / 2;
   const bestV = constMode === 'velocity' ? fixed : bestSearch;
   const bestA = constMode === 'velocity' ? bestSearch : fixed;
-  const final = simulateLanding(bestV, bestA, drag, magnus, params.dx, params.dy);
+  const final = simulateLanding(bestV, bestA, drag, magnus, targetDy);
 
-  const landingErr = final !== null ? Math.abs(final.landingY - params.dy) : Infinity;
+  const landingErr = final !== null ? Math.abs(final.landingX - targetDx) : Infinity;
   const accurate = landingErr <= threshold;
 
   const refined: GeneratedTrajectory = {
     ...traj,
     exitVelocity: Math.round(bestV * 1000) / 1000,
     exitAngle: Math.round(bestA * 1000) / 1000,
+    landingX: targetDx,
     timeOfFlight: final ? Math.round(final.timeOfFlight * 1000) / 1000 : traj.timeOfFlight,
     successfulBracket: true,
     accurate,
@@ -1161,6 +1289,19 @@ export function refineTrajectory(
 
 const REFINE_VEL_TOL = 0.05;
 const REFINE_ANG_TOL = 0.25;
+
+function dedupeTrajectories(trajectories: GeneratedTrajectory[]): GeneratedTrajectory[] {
+  return trajectories.filter(
+    (t, i) =>
+      !trajectories
+        .slice(0, i)
+        .some(
+          (other) =>
+            Math.abs(other.exitVelocity - t.exitVelocity) <= REFINE_VEL_TOL &&
+            Math.abs(other.exitAngle - t.exitAngle) <= REFINE_ANG_TOL
+        )
+  );
+}
 
 export function refineGroupTrajectories(
   group: TrajGroup,
@@ -1183,21 +1324,12 @@ export function refineGroupTrajectories(
       impactAngle: impact !== null ? Math.round(impact * 100) / 100 : t.impactAngle,
     };
     if (!r.successfulBracket) return withImpact;
-    const landing = simulateLanding(t.exitVelocity, t.exitAngle, drag, magnus, group.dx, group.dy);
+    const landing = simulateLanding(t.exitVelocity, t.exitAngle, drag, magnus, group.dy);
     const inGoal =
-      landing !== null && Math.abs(landing.landingY - group.dy) <= params.goalWidth / 2;
-    return { ...withImpact, successfulBracket: inGoal, accurate: r.accurate };
+      landing !== null && Math.abs(landing.landingX - group.dx) <= params.errorTolerance / 2;
+    return { ...withImpact, landingX: group.dx, successfulBracket: inGoal, accurate: r.accurate && inGoal };
   });
-  return withValidity.filter(
-    (t, i) =>
-      !withValidity
-        .slice(0, i)
-        .some(
-          (other) =>
-            Math.abs(other.exitVelocity - t.exitVelocity) <= REFINE_VEL_TOL &&
-            Math.abs(other.exitAngle - t.exitAngle) <= REFINE_ANG_TOL
-        )
-  );
+  return dedupeTrajectories(withValidity);
 }
 
 export function groupExportPayload(group: TrajGroup) {

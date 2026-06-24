@@ -2,8 +2,9 @@ import { useRef, useState, useEffect, useMemo } from 'react';
 import {
   Upload, Film, Trash2, Crosshair, RotateCcw, Save, Trash, SkipForward, FolderDown,
 } from 'lucide-react';
-import { VideoData, TrajectoryPoint, Meterstick } from '../types';
-import { empiricalFromPoints, gravityCorrectionQuality } from '../simulation';
+import { VideoData, TrajectoryPoint, Meterstick, LaunchParams } from '../types';
+import { empiricalFromPoints, gravityCorrectionQuality, type PixelsPerMeterSource } from '../simulation';
+import { MeterstickScale, scaleToPpmFn } from '../utils/meterstickScale';
 import {
   buildTrajectorySegments,
   activeSegmentAtFrame,
@@ -150,6 +151,8 @@ interface Props {
   canSkipFrame: boolean;
   onSkipFrame: () => void;
   onImportProject: (entries: ImportedProjectEntry[]) => void;
+  importProjectActionRef?: React.MutableRefObject<(() => void) | null>;
+  onLaunchParamsChangeForTrajectory: (trajectoryId: string, p: LaunchParams) => void;
 }
 
 export default function SysIdSidebar({
@@ -187,6 +190,8 @@ export default function SysIdSidebar({
   canSkipFrame,
   onSkipFrame,
   onImportProject,
+  importProjectActionRef,
+  onLaunchParamsChangeForTrajectory,
 }: Props) {
   const [activeTab, setActiveTab] = useState<SidebarTab>('uploadSave');
   const uploadInputRef = useRef<HTMLInputElement>(null);
@@ -208,18 +213,20 @@ export default function SysIdSidebar({
   const editingSegment = segmentAtCurrent ?? focusedSegment;
 
   const segmentStats = useMemo(() => {
-    const ppm = meterstick.length;
+    const ppmSource: PixelsPerMeterSource = selectedVideo
+      ? scaleToPpmFn(MeterstickScale.fromVideo(selectedVideo))
+      : meterstick.length;
     const stored = selectedVideo?.trajectoryLaunchParams;
     return segments.map((seg) => {
       const actual = getLaunchParams(stored, seg.id);
       return {
         ...seg,
-        ...empiricalFromPoints(seg.points, ppm, framerate, empiricalNumPoints),
+        ...empiricalFromPoints(seg.points, ppmSource, framerate, empiricalNumPoints),
         actualSpeed: actual.exitVelocity,
         actualAngle: actual.exitAngle,
       };
     });
-  }, [segments, meterstick.length, framerate, empiricalNumPoints, selectedVideo?.trajectoryLaunchParams]);
+  }, [segments, selectedVideo, meterstick.length, framerate, empiricalNumPoints, selectedVideo?.trajectoryLaunchParams]);
 
   const numPointsSliderMax = useMemo(() => {
     const longest = segments.reduce((m, s) => Math.max(m, countPlottedPoints(s.points)), 0);
@@ -228,13 +235,16 @@ export default function SysIdSidebar({
 
   const grayLineQuality = useMemo(() => {
     if (!editingSegment) return { r2: null, avgRadiusOfCurvature: null };
+    const ppmSource: PixelsPerMeterSource = selectedVideo
+      ? scaleToPpmFn(MeterstickScale.fromVideo(selectedVideo))
+      : meterstick.length;
     return gravityCorrectionQuality(
       editingSegment.points,
-      meterstick.length,
+      ppmSource,
       framerate,
       empiricalNumPoints
     );
-  }, [editingSegment, meterstick.length, framerate, empiricalNumPoints]);
+  }, [editingSegment, selectedVideo, meterstick.length, framerate, empiricalNumPoints]);
 
   function formatRadius(r: number | null): string {
     if (r === null) return '—';
@@ -264,6 +274,39 @@ export default function SysIdSidebar({
   }, [segmentStats]);
 
   const dt = framerate > 0 ? 1 / framerate : null;
+
+  function applyVelEstimate(trajectoryId: string, speed: number) {
+    if (!selectedVideo) return;
+    const current = getLaunchParams(selectedVideo.trajectoryLaunchParams, trajectoryId);
+    onLaunchParamsChangeForTrajectory(trajectoryId, { ...current, exitVelocity: speed });
+  }
+
+  function applyAngleEstimate(trajectoryId: string, angle: number) {
+    if (!selectedVideo) return;
+    const current = getLaunchParams(selectedVideo.trajectoryLaunchParams, trajectoryId);
+    onLaunchParamsChangeForTrajectory(trajectoryId, { ...current, exitAngle: angle });
+  }
+
+  function applyAllVelEstimates() {
+    if (!selectedVideo) return;
+    for (const seg of segmentStats) {
+      if (seg.speed !== null) {
+        applyVelEstimate(seg.id, seg.speed + 0.5);
+      }
+    }
+  }
+
+  function applyAllAngleEstimates() {
+    if (!selectedVideo) return;
+    for (const seg of segmentStats) {
+      if (seg.angle !== null) {
+        applyAngleEstimate(seg.id, seg.angle);
+      }
+    }
+  }
+
+  const canApplyAllVelEstimates = segmentStats.some((s) => s.speed !== null);
+  const canApplyAllAngleEstimates = segmentStats.some((s) => s.angle !== null);
 
   function handleUploadFiles(e: React.ChangeEvent<HTMLInputElement>) {
     if (e.target.files && e.target.files.length > 0) {
@@ -426,6 +469,10 @@ export default function SysIdSidebar({
     }, 150);
   }
 
+  if (importProjectActionRef) {
+    importProjectActionRef.current = handleImportProjectClick;
+  }
+
   function videoRowStats(v: VideoData) {
     const segs = buildTrajectorySegments(v.trajectory);
     const trajCount = segs.length;
@@ -447,7 +494,7 @@ export default function SysIdSidebar({
 
   const tabs: { id: SidebarTab; label: string }[] = [
     { id: 'uploadSave', label: 'Upload/Save' },
-    { id: 'annotation', label: 'Trajectory Annotation' },
+    { id: 'annotation', label: 'Traj Labeling' },
   ];
 
   return (
@@ -616,7 +663,7 @@ export default function SysIdSidebar({
                 </p>
 
                 <p className={panelBody}>
-                  Click on video to plot points. Arrow keys to step frames. WASD to nudge the current point by 1 cm. Delete key to remove current point. Ctrl + Z / Ctrl + Y to undo/redo. Click the meterstick, then Ctrl + C / Ctrl + V to copy its position and scale to another video.
+                  Click on video to plot points. Arrow keys to step frames. WASD to nudge the current point by 1 cm. Delete key to remove current point. Ctrl + Z / Ctrl + Y to undo/redo. Drag the yellow meterstick on the video to calibrate scale (each pair of points = 1 m). Right-click the line to add points; right-click a point to delete. Ctrl + C / Ctrl + V copies the meterstick to another video.
                 </p>
               </div>
 
@@ -624,7 +671,7 @@ export default function SysIdSidebar({
               <div className="flex-shrink-0 p-4 border-b border-gray-700 space-y-2">
                 <h3 className={panelSubsectionTitle}>Exit velocity / angle</h3>
                 <p className={panelBody}>
-                  Set framerate and calibrate the meterstick on the video. Exit speed and angle use gravity-corrected points (gray dots)—each shifted up by ½g·t² to undo sag—then weighted toward the earliest pairs. Gray points should form a straight line when correction is accurate.
+                  Set framerate and calibrate the horizontal meterstick on the video. Each consecutive pair of points spans 1 m; scale is interpolated by x for perspective. Exit speed and angle use gravity-corrected points (gray dots).
                 </p>
                 <div className="flex items-center gap-2">
                   <label className="text-sm text-gray-400 whitespace-nowrap flex-shrink-0">Framerate (fps)</label>
@@ -762,6 +809,26 @@ export default function SysIdSidebar({
                 <h3 className={`px-4 py-2.5 ${panelSectionTitle}`}>
                   Trajectories ({segments.length})
                 </h3>
+                {segments.length > 0 && (
+                  <div className="px-3 pb-2 flex gap-1.5">
+                    <button
+                      type="button"
+                      disabled={!canApplyAllVelEstimates}
+                      onClick={applyAllVelEstimates}
+                      className={`flex-1 ${panelBtn} text-[11px] py-1 px-1.5 disabled:opacity-30 disabled:cursor-not-allowed`}
+                    >
+                      Use vel estimate
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!canApplyAllAngleEstimates}
+                      onClick={applyAllAngleEstimates}
+                      className={`flex-1 ${panelBtn} text-[11px] py-1 px-1.5 disabled:opacity-30 disabled:cursor-not-allowed`}
+                    >
+                      Use angle estimate
+                    </button>
+                  </div>
+                )}
                 <div className="px-3 pb-3 space-y-1.5">
                   {segments.length === 0 && (
                     <p className={`${panelEmpty} py-4`}>No trajectories plotted yet</p>
@@ -771,32 +838,55 @@ export default function SysIdSidebar({
                       seg.id === editingSegment?.id ||
                       (focusedTrajectoryId === seg.id && !segmentAtCurrent);
                     return (
-                      <button
+                      <div
                         key={seg.id}
-                        onClick={() => {
-                          onFocusedTrajectoryChange(seg.id);
-                          onFrameChange(seg.frameStart);
-                        }}
-                        className={`w-full text-left ${panelListItem} ${
-                          isActive ? 'bg-gray-800 ring-1 ring-gray-600' : 'hover:bg-gray-800/60'
+                        className={`${panelListItem} ${
+                          isActive ? 'bg-gray-800 ring-1 ring-gray-600' : ''
                         }`}
                       >
-                        <div className="font-semibold" style={{ color: seg.color }}>
-                          {seg.name}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onFocusedTrajectoryChange(seg.id);
+                            onFrameChange(seg.frameStart);
+                          }}
+                          className="w-full text-left hover:opacity-90"
+                        >
+                          <div className="font-semibold" style={{ color: seg.color }}>
+                            {seg.name}
+                          </div>
+                          <div className={`text-sm text-gray-300 mt-1 ${panelMono}`}>
+                            <span className={panelMeta}>Estimate: </span>
+                            {seg.speed !== null ? `${seg.speed.toFixed(2)} m/s` : '— m/s'}
+                            {' · '}
+                            {seg.angle !== null ? `${seg.angle.toFixed(1)}°` : '—°'}
+                          </div>
+                          <div className={`text-sm text-gray-300 mt-0.5 ${panelMono}`}>
+                            <span className={panelMeta}>Actual: </span>
+                            {seg.actualSpeed.toFixed(2)} m/s
+                            {' · '}
+                            {seg.actualAngle.toFixed(1)}°
+                          </div>
+                        </button>
+                        <div className="flex gap-1.5 mt-2">
+                          <button
+                            type="button"
+                            disabled={seg.speed === null}
+                            onClick={() => seg.speed !== null && applyVelEstimate(seg.id, seg.speed)}
+                            className={`flex-1 ${panelBtn} text-[11px] py-1 px-1.5 disabled:opacity-30 disabled:cursor-not-allowed`}
+                          >
+                            Use vel estimate
+                          </button>
+                          <button
+                            type="button"
+                            disabled={seg.angle === null}
+                            onClick={() => seg.angle !== null && applyAngleEstimate(seg.id, seg.angle)}
+                            className={`flex-1 ${panelBtn} text-[11px] py-1 px-1.5 disabled:opacity-30 disabled:cursor-not-allowed`}
+                          >
+                            Use angle estimate
+                          </button>
                         </div>
-                        <div className={`text-sm text-gray-300 mt-1 ${panelMono}`}>
-                          <span className={panelMeta}>Estimate: </span>
-                          {seg.speed !== null ? `${seg.speed.toFixed(2)} m/s` : '— m/s'}
-                          {' · '}
-                          {seg.angle !== null ? `${seg.angle.toFixed(1)}°` : '—°'}
-                        </div>
-                        <div className={`text-sm text-gray-300 mt-0.5 ${panelMono}`}>
-                          <span className={panelMeta}>Actual: </span>
-                          {seg.actualSpeed.toFixed(2)} m/s
-                          {' · '}
-                          {seg.actualAngle.toFixed(1)}°
-                        </div>
-                      </button>
+                      </div>
                     );
                   })}
                 </div>
