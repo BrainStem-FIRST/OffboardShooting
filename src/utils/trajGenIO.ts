@@ -1,5 +1,12 @@
-import type { GeneratedTrajectory, TrajGroup } from '../types';
-import { groupExportFileName, groupExportPayload } from '../simulation';
+import type { GeneratedTrajectory, TrajGenParams, TrajGroup } from '../types';
+import {
+  groupExportFileName,
+  groupExportPayload,
+  resolveMagnusPower,
+  pickOptimalTrajectoryPath,
+  optimalPickWeightsFromParams,
+  type TrajectoryMoe,
+} from '../simulation';
 import { pickFolderForImport } from './projectIO';
 
 const TRAJ_GROUP_FILE_RE = /^\([\d.eE+-]+,\s*[\d.eE+-]+\)\.json$/;
@@ -20,11 +27,6 @@ export function parseTrajGroupJson(json: unknown, batchId = Date.now()): TrajGro
   }
   if (!Array.isArray(record.trajectories)) return null;
 
-  const biggestMOETrajectory =
-    typeof record.biggestMOETrajectory === 'number' && Number.isInteger(record.biggestMOETrajectory)
-      ? record.biggestMOETrajectory
-      : undefined;
-
   const trajs: GeneratedTrajectory[] = (record.trajectories as Record<string, number>[]).map((t, i) => ({
     id: `import-${batchId}-${i}-${Math.random().toString(36).slice(2)}`,
     exitVelocity: t.speed ?? 0,
@@ -34,6 +36,10 @@ export function parseTrajGroupJson(json: unknown, batchId = Date.now()): TrajGro
     landingX: importedDx,
     ...(typeof t.speedMoe === 'number' ? { speedMoe: t.speedMoe } : {}),
     ...(typeof t.angleMoe === 'number' ? { angleMoe: t.angleMoe } : {}),
+    ...(typeof t.speedMoeMinus === 'number' ? { speedMoeMinus: t.speedMoeMinus } : {}),
+    ...(typeof t.speedMoePlus === 'number' ? { speedMoePlus: t.speedMoePlus } : {}),
+    ...(typeof t.angleMoeMinus === 'number' ? { angleMoeMinus: t.angleMoeMinus } : {}),
+    ...(typeof t.angleMoePlus === 'number' ? { angleMoePlus: t.angleMoePlus } : {}),
   }));
 
   return {
@@ -43,11 +49,6 @@ export function parseTrajGroupJson(json: unknown, batchId = Date.now()): TrajGro
     drag: importedDrag,
     magnus: importedMagnus,
     trajectories: trajs,
-    ...(biggestMOETrajectory !== undefined &&
-    biggestMOETrajectory >= 0 &&
-    biggestMOETrajectory < trajs.length
-      ? { biggestMOETrajectory }
-      : {}),
   };
 }
 
@@ -166,20 +167,10 @@ export async function loadTrajGroupsFromDirectory(
         continue;
       }
       group.id = `import-${batchId}-${group.dx.toFixed(6)}-${group.dy.toFixed(6)}-${Math.random().toString(36).slice(2)}`;
-      const biggestIdx = group.biggestMOETrajectory;
       group.trajectories = group.trajectories.map((t, i) => ({
         ...t,
         id: `import-${batchId}-${i}-${Math.random().toString(36).slice(2)}`,
       }));
-      if (
-        biggestIdx !== undefined &&
-        biggestIdx >= 0 &&
-        biggestIdx < group.trajectories.length
-      ) {
-        group.biggestMOETrajectory = biggestIdx;
-      } else {
-        delete group.biggestMOETrajectory;
-      }
       groups.push(group);
     } catch {
       warnings.push(`Skipped "${name}": invalid JSON.`);
@@ -203,8 +194,9 @@ export async function loadTrajGroupsFromDirectory(
 export async function saveTrajGroupsToDirectory(
   writeDir: FileSystemDirectoryHandle,
   groups: TrajGroup[],
-  errorTolerance: number,
+  params: Pick<TrajGenParams, 'errorTolerance' | 'magnusPower' | 'goalPlaneAngleDeg' | 'optimalMoeWeight' | 'optimalSpeedDerivWeight' | 'optimalAngleDerivWeight' | 'optimalSpeedSecondDerivWeight' | 'optimalAngleSecondDerivWeight'>,
   onProgress?: (current: number, total: number) => void,
+  trajMoeById?: Map<string, TrajectoryMoe>,
 ): Promise<SaveTrajFolderResult> {
   const groupsWithTrajs = groups.filter((g) => g.trajectories.length > 0);
   if (groupsWithTrajs.length === 0) {
@@ -215,11 +207,27 @@ export async function saveTrajGroupsToDirectory(
     return { ok: false, message: 'Write permission was denied for the imported trajectory folder.' };
   }
 
+  const optimalIds =
+    trajMoeById && trajMoeById.size > 0
+      ? pickOptimalTrajectoryPath(groupsWithTrajs, trajMoeById, optimalPickWeightsFromParams(params as TrajGenParams))
+      : new Set<string>();
+
   for (let i = 0; i < groupsWithTrajs.length; i++) {
     const group = groupsWithTrajs[i];
     onProgress?.(i + 1, groupsWithTrajs.length);
     const fileName = groupExportFileName(group);
-    const text = JSON.stringify(groupExportPayload(group, errorTolerance), null, 4);
+    const optimalTraj = group.trajectories.find((t) => optimalIds.has(t.id));
+    const text = JSON.stringify(
+      groupExportPayload(
+        group,
+        params.errorTolerance,
+        resolveMagnusPower(params.magnusPower),
+        params.goalPlaneAngleDeg,
+        optimalTraj?.id,
+      ),
+      null,
+      4,
+    );
     try {
       await writeTextToFile(writeDir, fileName, text);
     } catch (err) {

@@ -4,7 +4,7 @@ import { Trash2, Download, Upload, RefreshCw, Copy, ChevronUp, ChevronDown, XCir
 import { ImportFolderButton } from './ImportFolderButton';
 import {
   simulateLanding, simulateImpactAngle, refineTrajectory, downloadTrajectoriesArchive,
-  REFINE_MAX_ITER, REFINE_THRESHOLD_M, RAW_TRAJECTORY_ERROR_TOLERANCE, type TrajectoryMoe, type MoeRecalcProgress,
+  REFINE_MAX_ITER, REFINE_THRESHOLD_M, RAW_TRAJECTORY_ERROR_TOLERANCE, resolveMagnusPower, formatMoeBounds, type TrajectoryMoe, type MoeRecalcProgress,
 } from '../simulation';
 import {
   panelAside, panelSectionTitle, panelBtnPrimary,
@@ -35,79 +35,128 @@ interface Props {
   onShowBiggestMoeChange: (showBiggestMoe: boolean) => void;
   params: TrajGenParams;
   onParamsChange: (params: TrajGenParams) => void;
-  onRecalculateMoe: (errorTolerance: number) => void;
+  onRecalculateMoe: (errorTolerance: number, goalPlaneAngleDeg: number) => void;
   moeRecalculating: boolean;
   moeRecalcProgress: MoeRecalcProgress | null;
   width: number;
 }
 
 function ErrorToleranceInput({
-  value,
-  onChange,
+  toleranceValue,
+  goalAngleValue,
+  showGoalPlanes,
+  onToleranceChange,
+  onGoalAngleChange,
+  onShowGoalPlanesChange,
   onRecalculate,
   recalcDisabled,
   recalculating,
   recalcProgress,
 }: {
-  value: number;
-  onChange: (v: number) => void;
-  onRecalculate: (errorTolerance: number) => void;
+  toleranceValue: number;
+  goalAngleValue: number;
+  showGoalPlanes: boolean;
+  onToleranceChange: (v: number) => void;
+  onGoalAngleChange: (v: number) => void;
+  onShowGoalPlanesChange: (checked: boolean) => void;
+  onRecalculate: (tolerance: number, goalAngle: number) => void;
   recalcDisabled: boolean;
   recalculating: boolean;
   recalcProgress: MoeRecalcProgress | null;
 }) {
-  const [raw, setRaw] = useState(String(value));
-  const [focused, setFocused] = useState(false);
+  const [tolRaw, setTolRaw] = useState(String(toleranceValue));
+  const [angleRaw, setAngleRaw] = useState(String(goalAngleValue));
+  const [tolFocused, setTolFocused] = useState(false);
+  const [angleFocused, setAngleFocused] = useState(false);
 
   useEffect(() => {
-    if (!focused) setRaw(String(value));
-  }, [value, focused]);
+    if (!tolFocused) setTolRaw(String(toleranceValue));
+  }, [toleranceValue, tolFocused]);
 
-  function commit(str: string) {
+  useEffect(() => {
+    if (!angleFocused) setAngleRaw(String(goalAngleValue));
+  }, [goalAngleValue, angleFocused]);
+
+  function commitTolerance(str: string) {
     const stripped = str.replace(/[^0-9.\-]/g, '');
     let n = parseFloat(stripped);
     if (isNaN(n)) n = 0.05;
     n = Math.max(0.05, n);
-    setRaw(String(n));
-    onChange(n);
+    setTolRaw(String(n));
+    onToleranceChange(n);
+    return n;
+  }
+
+  function commitAngle(str: string) {
+    const stripped = str.replace(/[^0-9.\-]/g, '');
+    let n = parseFloat(stripped);
+    if (isNaN(n)) n = 0;
+    n = Math.max(-89, Math.min(89, n));
+    setAngleRaw(String(n));
+    onGoalAngleChange(n);
     return n;
   }
 
   function handleRecalculate() {
-    const n = commit(raw);
-    onRecalculate(n);
+    const tol = commitTolerance(tolRaw);
+    const angle = commitAngle(angleRaw);
+    onRecalculate(tol, angle);
   }
 
   return (
-    <div className="space-y-1">
-      <div className="flex items-center justify-between">
-        <label className={panelSubsectionTitle}>Error Tolerance</label>
-        <span className={panelMeta}>m</span>
+    <div className="space-y-2">
+      <div className="grid grid-cols-2 gap-2">
+        <div className="space-y-1">
+          <div className="flex items-center justify-between">
+            <label className={panelSubsectionTitle}>Error Tolerance</label>
+            <span className={panelMeta}>m</span>
+          </div>
+          <input
+            type="text"
+            inputMode="decimal"
+            value={tolRaw}
+            onChange={(e) => setTolRaw(e.target.value)}
+            onFocus={() => setTolFocused(true)}
+            onBlur={(e) => { setTolFocused(false); commitTolerance(e.target.value); }}
+            onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+            className={`${panelInput} w-full min-w-0`}
+          />
+        </div>
+        <div className="space-y-1">
+          <div className="flex items-center justify-between">
+            <label className={panelSubsectionTitle}>Goal Plane Angle</label>
+            <span className={panelMeta}>deg</span>
+          </div>
+          <input
+            type="text"
+            inputMode="decimal"
+            value={angleRaw}
+            onChange={(e) => setAngleRaw(e.target.value)}
+            onFocus={() => setAngleFocused(true)}
+            onBlur={(e) => { setAngleFocused(false); commitAngle(e.target.value); }}
+            onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+            className={`${panelInput} w-full min-w-0`}
+          />
+        </div>
       </div>
-      <div className="flex items-center gap-2">
-        <input
-          type="text"
-          inputMode="decimal"
-          value={raw}
-          onChange={(e) => setRaw(e.target.value)}
-          onFocus={() => setFocused(true)}
-          onBlur={(e) => { setFocused(false); commit(e.target.value); }}
-          onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
-          className={`${panelInput} flex-1 min-w-0`}
-        />
-        <button
-          type="button"
-          onClick={handleRecalculate}
-          disabled={recalcDisabled || recalculating}
-          className={`flex-shrink-0 px-2.5 py-1.5 text-sm rounded border transition-colors ${
-            recalcDisabled || recalculating
-              ? 'border-gray-700 bg-gray-800 text-gray-500 cursor-not-allowed'
-              : 'border-gray-600 bg-gray-700 hover:bg-gray-600 text-white'
-          }`}
-        >
-          {recalculating ? 'Recalculating…' : 'Recalculate'}
-        </button>
-      </div>
+      <button
+        type="button"
+        onClick={handleRecalculate}
+        disabled={recalcDisabled || recalculating}
+        className={`w-full px-2.5 py-1.5 text-sm rounded border transition-colors ${
+          recalcDisabled || recalculating
+            ? 'border-gray-700 bg-gray-800 text-gray-500 cursor-not-allowed'
+            : 'border-gray-600 bg-gray-700 hover:bg-gray-600 text-white'
+        }`}
+      >
+        {recalculating ? 'Recalculating…' : 'Recalculate'}
+      </button>
+      <CheckboxLabel
+        checked={showGoalPlanes}
+        onChange={onShowGoalPlanesChange}
+        label="Show goal planes"
+        labelClassName="text-sm text-gray-400"
+      />
       {recalculating && (
         <ProgressBar
           className="pt-1"
@@ -137,6 +186,7 @@ export default function TrajectoryGenRight({
   const trajectories = group?.trajectories ?? [];
   const drag = group?.drag ?? params.dragCoefficient;
   const magnus = group?.magnus ?? params.magnusGain;
+  const magnusPower = resolveMagnusPower(group?.magnusPower ?? params.magnusPower);
 
   const [sortKey, setSortKey] = useState<SortKey>('exitAngle');
   const [sortAsc, setSortAsc] = useState(true);
@@ -184,10 +234,10 @@ export default function TrajectoryGenRight({
     dy: number,
   ): GeneratedTrajectory {
     const t = result.trajectory;
-    const impact = simulateImpactAngle(t.exitVelocity, t.exitAngle, dragRef.current, magnusRef.current, dx);
+    const impact = simulateImpactAngle(t.exitVelocity, t.exitAngle, dragRef.current, magnusRef.current, dx, magnusPower);
     const withImpact = { ...t, impactAngle: impact !== null ? Math.round(impact * 100) / 100 : t.impactAngle };
     if (!result.successfulBracket) return withImpact;
-    const landing = simulateLanding(t.exitVelocity, t.exitAngle, dragRef.current, magnusRef.current, dy);
+    const landing = simulateLanding(t.exitVelocity, t.exitAngle, dragRef.current, magnusRef.current, dy, magnusPower);
     const inGoal = landing !== null && Math.abs(landing.landingX - dx) <= RAW_TRAJECTORY_ERROR_TOLERANCE / 2;
     return { ...withImpact, successfulBracket: inGoal, accurate: result.accurate && inGoal };
   }
@@ -249,8 +299,8 @@ export default function TrajectoryGenRight({
       onUpdateGroup(group.id, trajectories.map(t => {
         if (t.id !== cell.id) return t;
         const next = { ...t, [cell.field]: n };
-        const landing = simulateLanding(next.exitVelocity, next.exitAngle, drag, magnus, group.dy);
-        const impact = simulateImpactAngle(next.exitVelocity, next.exitAngle, drag, magnus, group.dx);
+        const landing = simulateLanding(next.exitVelocity, next.exitAngle, drag, magnus, group.dy, magnusPower);
+        const impact = simulateImpactAngle(next.exitVelocity, next.exitAngle, drag, magnus, group.dx, magnusPower);
         return {
           ...next,
           landingX: group.dx,
@@ -263,7 +313,7 @@ export default function TrajectoryGenRight({
   }
 
   const withLandingError = group ? trajectories.map(t => {
-    const landing = simulateLanding(t.exitVelocity, t.exitAngle, drag, magnus, group.dy);
+    const landing = simulateLanding(t.exitVelocity, t.exitAngle, drag, magnus, group.dy, magnusPower);
     const landingError = landing !== null ? (landing.landingX - group.dx) * 1000 : null;
     return { ...t, landingError };
   }) : [];
@@ -300,7 +350,7 @@ export default function TrajectoryGenRight({
   }
 
   function handleDownload() {
-    downloadTrajectoriesArchive(groups, params);
+    downloadTrajectoriesArchive(groups, params, trajMoeById);
   }
 
   function handleSaveAllClick() {
@@ -324,10 +374,11 @@ export default function TrajectoryGenRight({
         const result = await saveTrajGroupsToDirectory(
           trajWriteDirRef.current!,
           groups,
-          params.errorTolerance,
+          params,
           (current, total) => {
             setImportStatus({ ok: null, text: `Saving trajectories ${current}/${total}…` });
           },
+          trajMoeById,
         );
         if (!result.ok) {
           setImportStatus({ ok: false, text: result.message });
@@ -536,6 +587,10 @@ export default function TrajectoryGenRight({
             <span className={panelMeta}>Magnus</span>
             <span className={`text-sm ${panelMono} text-gray-400`}>{magnus}</span>
           </div>
+          <div className="flex items-center gap-1.5">
+            <span className={panelMeta}>Magnus Power</span>
+            <span className={`text-sm ${panelMono} text-gray-400`}>{magnusPower}</span>
+          </div>
           <span className={`ml-auto text-sm ${panelMono} text-gray-500`}>
             {trajectories.length} in tab
           </span>
@@ -637,7 +692,7 @@ export default function TrajectoryGenRight({
                       {traj.exitVelocity.toFixed(3)}
                       {moe && (
                         <span className={`text-xs ${isMaxMoe ? 'text-green-400' : 'text-gray-500'}`}>
-                          {' '}±{moe.speedMoe.toFixed(3)}
+                          {' '}{formatMoeBounds(moe.speedMoeMinus, moe.speedMoePlus, 3)}
                         </span>
                       )}
                     </span>
@@ -667,7 +722,7 @@ export default function TrajectoryGenRight({
                       {traj.exitAngle.toFixed(2)}°
                       {moe && (
                         <span className={`text-xs ${isMaxMoe ? 'text-green-400' : 'text-gray-500'}`}>
-                          {' '}±{moe.angleMoe.toFixed(2)}°
+                          {' '}{formatMoeBounds(moe.angleMoeMinus, moe.angleMoePlus, 2, '°')}
                         </span>
                       )}
                     </span>
@@ -726,13 +781,17 @@ export default function TrajectoryGenRight({
         </div>
       )}
 
-      {/* Bottom controls — always visible */}
-      <div className="flex-shrink-0 p-4 space-y-4 border-t border-gray-700">
+      {/* Bottom utilities — capped height, scroll when content overflows */}
+      <div className="flex-shrink-0 max-h-48 min-h-0 overflow-y-auto p-3 space-y-3 border-t border-gray-700">
             <div className="space-y-2">
               <h3 className={panelSectionTitle}>Optimal trajectory</h3>
               <ErrorToleranceInput
-                value={params.errorTolerance}
-                onChange={(v) => onParamsChange({ ...params, errorTolerance: v })}
+                toleranceValue={params.errorTolerance}
+                goalAngleValue={params.goalPlaneAngleDeg}
+                showGoalPlanes={params.showGoalPlanes}
+                onToleranceChange={(v) => onParamsChange({ ...params, errorTolerance: v })}
+                onGoalAngleChange={(v) => onParamsChange({ ...params, goalPlaneAngleDeg: v })}
+                onShowGoalPlanesChange={(checked) => onParamsChange({ ...params, showGoalPlanes: checked })}
                 onRecalculate={onRecalculateMoe}
                 recalcDisabled={groups.length === 0}
                 recalculating={moeRecalculating}

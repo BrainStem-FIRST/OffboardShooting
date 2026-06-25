@@ -1,5 +1,6 @@
 import { TrajectoryPoint, LaunchParams, Meterstick, MeterstickPoint, VideoData, XDir } from '../types';
 import { defaultMeterstickPoints, horizontalizeMeterstickPoints, meterstickFromPoints, normalizeSegmentMeters } from './meterstickScale';
+import { elapsedSeconds } from './frameTiming';
 
 export const DEFAULT_LAUNCH_PARAMS: LaunchParams = {
   exitVelocity: 8,
@@ -58,7 +59,18 @@ export function createSkippedPoint(frame: number): TrajectoryPoint {
   return { frame, skipped: true, x: 0, y: 0 };
 }
 
-/** Plotted runs broken when frame numbers are not consecutive (skipped frames break lines). */
+/** Max frame index gap between labeled entries; allows up to 2 skipped frames in between. */
+export const MAX_LABEL_FRAME_GAP = 3;
+
+export function frameGapBetween(aFrame: number, bFrame: number): number {
+  return Math.abs(bFrame - aFrame);
+}
+
+export function withinLabelFrameGap(aFrame: number, bFrame: number): boolean {
+  return frameGapBetween(aFrame, bFrame) <= MAX_LABEL_FRAME_GAP;
+}
+
+/** Plotted runs broken when more than 2 frames are skipped between plotted points. */
 export function plottedPathSegments(points: TrajectoryPoint[]): TrajectoryPoint[][] {
   const sorted = [...points].sort((a, b) => a.frame - b.frame);
   const segments: TrajectoryPoint[][] = [];
@@ -72,7 +84,7 @@ export function plottedPathSegments(points: TrajectoryPoint[]): TrajectoryPoint[
       lastPlottedFrame = pt.frame;
       continue;
     }
-    if (pt.frame === lastPlottedFrame + 1) {
+    if (withinLabelFrameGap(lastPlottedFrame, pt.frame)) {
       current.push(pt);
     } else {
       segments.push(current);
@@ -89,7 +101,7 @@ export function splitIntoSegments(points: TrajectoryPoint[]): TrajectoryPoint[][
   if (sorted.length === 0) return [];
   const groups: TrajectoryPoint[][] = [[sorted[0]]];
   for (let i = 1; i < sorted.length; i++) {
-    if (sorted[i].frame - sorted[i - 1].frame > 1) {
+    if (!withinLabelFrameGap(sorted[i - 1].frame, sorted[i].frame)) {
       groups.push([sorted[i]]);
     } else {
       groups[groups.length - 1].push(sorted[i]);
@@ -119,15 +131,33 @@ export function segmentAtFrame(segments: TrajectorySegment[], frame: number): Tr
   return segments.find((s) => frame >= s.frameStart && frame <= s.frameEnd) ?? null;
 }
 
-/** Segment at this frame, or the one being extended on the next/previous consecutive frame. */
+/** Segment at this frame, or one within the label gap on either side. */
 export function activeSegmentAtFrame(segments: TrajectorySegment[], frame: number): TrajectorySegment | null {
   const direct = segmentAtFrame(segments, frame);
   if (direct) return direct;
-  return (
-    segments.find((s) => s.frameEnd + 1 === frame) ??
-    segments.find((s) => s.frameStart - 1 === frame) ??
-    null
-  );
+  const after = segments
+    .filter((s) => frame > s.frameEnd && withinLabelFrameGap(s.frameEnd, frame))
+    .sort((a, b) => a.frameEnd - b.frameEnd);
+  if (after.length > 0) return after[after.length - 1];
+  const before = segments
+    .filter((s) => frame < s.frameStart && withinLabelFrameGap(frame, s.frameStart))
+    .sort((a, b) => a.frameStart - b.frameStart);
+  return before[0] ?? null;
+}
+
+/** All segments connected to anchor through gaps of at most 2 skipped frames. */
+export function segmentsWithinLabelGap(
+  segments: TrajectorySegment[],
+  anchor: TrajectorySegment
+): TrajectorySegment[] {
+  const sorted = [...segments].sort((a, b) => a.frameStart - b.frameStart);
+  const idx = sorted.findIndex((s) => s.id === anchor.id);
+  if (idx < 0) return [anchor];
+  let lo = idx;
+  let hi = idx;
+  while (lo > 0 && withinLabelFrameGap(sorted[lo - 1].frameEnd, sorted[lo].frameStart)) lo--;
+  while (hi < sorted.length - 1 && withinLabelFrameGap(sorted[hi].frameEnd, sorted[hi + 1].frameStart)) hi++;
+  return sorted.slice(lo, hi + 1);
 }
 
 export function resolveActiveSegment(
@@ -179,9 +209,10 @@ function positionAtTime(sorted: TimedPoint[], t: number): { x: number; y: number
 /** Time-from-launch average of all segments; requires ≥2 segments with ≥2 points each. */
 export function averageTrajectoryFromSegments(
   segments: TrajectorySegment[],
-  framerate: number
+  framerate: number,
+  frameTimes?: number[]
 ): TrajectoryPoint[] {
-  if (framerate <= 0) return [];
+  if (!frameTimes?.length && framerate <= 0) return [];
 
   const timedSegments: TimedPoint[][] = segments
     .filter((s) => countPlottedPoints(s.points) >= 2)
@@ -189,7 +220,7 @@ export function averageTrajectoryFromSegments(
       const sorted = plottedPoints(s.points).sort((a, b) => a.frame - b.frame);
       const frameStart = sorted[0].frame;
       return sorted.map((p) => ({
-        t: (p.frame - frameStart) / framerate,
+        t: elapsedSeconds(frameTimes, framerate, p.frame, frameStart),
         x: p.x,
         y: p.y,
       }));
@@ -316,6 +347,32 @@ function configurationSaveFileToLoaded(data: ConfigurationSaveFile): LoadedConfi
     meterstickSegmentMeters: segmentMeters,
     trajectoryLaunchParams,
   };
+}
+
+export function applyLoadedConfigurationToVideo(
+  video: VideoData,
+  config: LoadedConfiguration
+): VideoData {
+  const updated: VideoData = { ...video, trajectory: config.points };
+  if (config.meterstickPoints && config.meterstickPoints.length >= 2) {
+    updated.meterstickPoints = horizontalizeMeterstickPoints(config.meterstickPoints);
+    updated.meterstickSegmentMeters = normalizeSegmentMeters(
+      updated.meterstickPoints.length,
+      config.meterstickSegmentMeters
+    );
+    updated.meterstick = meterstickFromPoints(updated.meterstickPoints, updated.meterstickSegmentMeters);
+  } else if (config.meterstick) {
+    updated.meterstick = config.meterstick;
+    updated.meterstickPoints = defaultMeterstickPoints(config.meterstick);
+    updated.meterstickSegmentMeters = defaultSegmentMeters(updated.meterstickPoints.length);
+  }
+  if (config.trajectoryLaunchParams) {
+    updated.trajectoryLaunchParams = config.trajectoryLaunchParams;
+  }
+  updated.xdir = config.xdir === -1 ? -1 : 1;
+  const firstPt = firstTrajectoryPoint(updated.trajectory);
+  if (firstPt) updated.currentFrame = firstPt.frame;
+  return updated;
 }
 
 export function parseConfigurationFile(text: string): LoadedConfiguration | null {

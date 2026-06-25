@@ -1,0 +1,13 @@
+---
+alwaysApply: true
+---
+UI is split in 2 tabs: Trajectory Generation and System Identification
+Sysid has a video where users go through frame-by-frame and plot positions of ball.
+when users first upload video popup appears (called setup popup) 
+There is sim overlay so they can fit drag and magnus coefficients.
+Traj gen generates trajectories using drag and magnus coefficients.
+Each UI tab has a left and right panel.
+Sysid left panel has 2 tabs: upload/save and traj labeling
+Sysid right panel has a sim section where users specify simulation overly
+Traj Gen left panel has parameters to generate trajectories
+Traj Gen right panel shows a list of generated trajectories as well as utility functions to manage and save trajectories

@@ -18,6 +18,7 @@ interface TrajectoryFitEntry {
   launchParams: LaunchParams;
   pixelsPerMeter: PixelsPerMeterSource;
   framerate: number;
+  frameTimes?: number[];
   xdir: 1 | -1;
 }
 
@@ -32,6 +33,7 @@ interface Props {
   xdir: 1 | -1;
   meterstickScale: MeterstickScale;
   framerate: number;
+  frameTimes?: number[];
   onLaunchParamsChange: (p: LaunchParams) => void;
   onLaunchParamsChangeForTrajectory: (trajectoryId: string, p: LaunchParams) => void;
   onLaunchParamsChangeForVideo: (videoId: string, trajectoryId: string, p: LaunchParams) => void;
@@ -241,7 +243,11 @@ function trajectoryPpmAtLaunch(t: TrajectoryFitEntry): number {
 }
 
 function isTrajectoryFittable(t: TrajectoryFitEntry): boolean {
-  return countPlottedPoints(t.points) >= 3 && trajectoryPpmAtLaunch(t) > 0 && t.framerate > 0;
+  return (
+    countPlottedPoints(t.points) >= 3 &&
+    trajectoryPpmAtLaunch(t) > 0 &&
+    (t.framerate > 0 || (t.frameTimes?.length ?? 0) > 0)
+  );
 }
 
 export default function SimulationControls({
@@ -255,6 +261,7 @@ export default function SimulationControls({
   xdir,
   meterstickScale,
   framerate,
+  frameTimes,
   onLaunchParamsChange,
   onLaunchParamsChangeForTrajectory,
   onLaunchParamsChangeForVideo,
@@ -314,7 +321,8 @@ export default function SimulationControls({
   const videosAvailable = allVideosTrajectories.length > 0;
 
   const trajectoryCosts = useMemo(() => {
-    if (!meterstickScale.isCalibrated() || framerate <= 0) {
+    const timingReady = (frameTimes?.length ?? 0) > 0 || framerate > 0;
+    if (!meterstickScale.isCalibrated() || !timingReady) {
       return { visible: null as number | null, average: null as number | null };
     }
 
@@ -325,7 +333,8 @@ export default function SimulationControls({
             launchParams,
             (x) => meterstickScale.getPixelsPerMeter(x),
             framerate,
-            xdir
+            xdir,
+            frameTimes
           )?.meanDistance ?? null
         : null;
 
@@ -337,8 +346,9 @@ export default function SimulationControls({
           entry.points,
           params,
           entry.pixelsPerMeter,
-          framerate,
-          entry.xdir
+          entry.framerate,
+          entry.xdir,
+          entry.frameTimes
         )?.meanDistance ?? null;
       })
       .filter((c): c is number => c !== null && Number.isFinite(c));
@@ -354,6 +364,7 @@ export default function SimulationControls({
     fittableTrajectories,
     meterstickScale,
     framerate,
+    frameTimes,
     xdir,
   ]);
 
@@ -421,7 +432,7 @@ export default function SimulationControls({
     fitDimensions > 0 &&
     (fitAllVideos
       ? fittableAllVideosTrajectories.length > 0
-      : meterstickScale.isCalibrated() && framerate > 0) &&
+      : meterstickScale.isCalibrated() && ((frameTimes?.length ?? 0) > 0 || framerate > 0)) &&
     (fitTargets.fitExitVelocity ||
       (fitAllVideos || fitWholeVideo
         ? fitTargetEntries.every((t) => t.launchParams.exitVelocity > 0)
@@ -471,6 +482,7 @@ export default function SimulationControls({
       magnusPower: t.launchParams.magnusPower ?? 2,
       pixelsPerMeter: t.pixelsPerMeter,
       framerate: t.framerate,
+      frameTimes: t.frameTimes,
       xdir: t.xdir,
     }));
 
@@ -609,7 +621,7 @@ export default function SimulationControls({
               label="Magnus Coefficient"
               unit="k"
               value={launchParams.magnusGain}
-              min={-0.5}
+              min={-1}
               max={0.5}
               step={0.01}
               disabled={!hasTrajectory}
@@ -857,7 +869,7 @@ export default function SimulationControls({
         <p className={panelBody}>
           g = {GRAVITY_MS2} m/s²<br />
           F<sub>drag</sub> = b · v²<br />
-          F<sub>magnus</sub> = k · v<sup>x</sup><br />
+          F<sub>magnus</sub> = k · v<sup>x</sup> · (v̂<sub>⊥</sub>), +k = backspin<br />
           dt = {SIM_DT * 1000} ms timestep
         </p>
         <p className={panelBody}>

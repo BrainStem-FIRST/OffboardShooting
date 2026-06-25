@@ -8,11 +8,13 @@ import XdirUploadDialog from './components/XdirUploadDialog';
 import TrajectoryGenCenter from './components/TrajectoryGenCenter';
 import TrajectoryGenLeft from './components/TrajectoryGenLeft';
 import TrajectoryGenRight from './components/TrajectoryGenRight';
-import { generateTrajectoriesAsync, refineTrajectoriesAsync, buildTrajectoryMoeMap, buildTrajectoryMoeMapAsync, type TrajGenProgress, type MoeRecalcProgress, type TrajectoryMoe } from './simulation';
-import { buildTrajectorySegments, resolveActiveSegment, getLaunchParams, createSkippedPoint, firstTrajectoryPoint } from './utils/trajectorySegments';
+import { generateTrajectoriesAsync, refineTrajectoriesAsync, buildTrajectoryMoeMapAsync, syncGroupMoeInMap, trajIdsNeedingMoeRecompute, pickOptimalTrajectoryPath, optimalPickWeightsFromParams, type TrajGenProgress, type MoeRecalcProgress, type TrajectoryMoe, type MoeSettings } from './simulation';
+import { buildTrajectorySegments, resolveActiveSegment, getLaunchParams, createSkippedPoint, applyLoadedConfigurationToVideo, type LoadedConfiguration } from './utils/trajectorySegments';
 import { isUnsuccessfulTrajectory } from './utils/trajGenStatus';
 import type { ImportedProjectEntry } from './utils/projectIO';
 import { MeterstickScale, defaultMeterstickPoints, scaleToPpmFn, horizontalizeMeterstickPoints, meterstickFromPoints, adjustSegmentMetersForPointChange, normalizeSegmentMeters, defaultSegmentMeters } from './utils/meterstickScale';
+import { extractFrameTimestamps } from './utils/extractFrameTimestamps';
+import { applyExtractedFrameTiming } from './utils/frameTiming';
 
 const LEFT_MIN = 160;
 const LEFT_MAX = 480;
@@ -53,7 +55,11 @@ const DEFAULT_TRAJGEN_PARAMS: TrajGenParams = {
   dxMin: 1,
   dxMax: 5,
   dxStep: 0.2,
+  regeneratePerDistanceStep: false,
+  perDistanceErrorTolerance: 0.5,
   errorTolerance: 0.4,
+  goalPlaneAngleDeg: 0,
+  showGoalPlanes: false,
   exitAngleMin: 30,
   exitAngleMax: 85,
   angleStep: 0.5,
@@ -67,6 +73,11 @@ const DEFAULT_TRAJGEN_PARAMS: TrajGenParams = {
   dragCoefficient: 0.01,
   magnusGain: 0,
   magnusPower: 1,
+  optimalMoeWeight: 1,
+  optimalSpeedDerivWeight: 0.3,
+  optimalAngleDerivWeight: 0.3,
+  optimalSpeedSecondDerivWeight: 0.1,
+  optimalAngleSecondDerivWeight: 0.1,
 };
 
 function ResizeHandle({ onMouseDown }: { onMouseDown: (e: React.MouseEvent) => void }) {
@@ -96,11 +107,13 @@ export default function App() {
 
   // Trajectory annotation UI state (sysid)
   const [plottingMode, setPlottingMode] = useState(false);
+  const [pointRadius, setPointRadius] = useState(5);
   const [showAllTrajectories, setShowAllTrajectories] = useState(false);
   const [showAverageTrajectory, setShowAverageTrajectory] = useState(false);
   const [showTrajectoryPoints, setShowTrajectoryPoints] = useState(true);
   const [focusedTrajectoryId, setFocusedTrajectoryId] = useState<string | null>(null);
   const [totalFrames, setTotalFrames] = useState(1);
+  const [videoDuration, setVideoDuration] = useState(0);
   const undoStack = useRef<TrajectoryPoint[][]>([]);
   const redoStack = useRef<TrajectoryPoint[][]>([]);
   const meterstickClipboardRef = useRef<MeterstickClipboard | null>(null);
@@ -124,7 +137,75 @@ export default function App() {
   const [moeRecalculating, setMoeRecalculating] = useState(false);
   const [moeRecalcProgress, setMoeRecalcProgress] = useState<MoeRecalcProgress | null>(null);
   const trajGroupsRef = useRef(trajGroups);
+  const trajGenParamsRef = useRef(trajGenParams);
   trajGroupsRef.current = trajGroups;
+  trajGenParamsRef.current = trajGenParams;
+
+  const getMoeSettings = useCallback((): MoeSettings => {
+    const p = trajGenParamsRef.current;
+    return {
+      errorTolerance: p.errorTolerance,
+      magnusPower: p.magnusPower ?? 2,
+      goalPlaneAngleDeg: p.goalPlaneAngleDeg,
+    };
+  }, []);
+
+  const scheduleFullMoeBuild = useCallback((groups: TrajGroup[]) => {
+    if (groups.length === 0) {
+      setTrajMoeById(new Map());
+      return;
+    }
+    const settings = getMoeSettings();
+    void buildTrajectoryMoeMapAsync(
+      groups,
+      settings.errorTolerance,
+      false,
+      () => {},
+      undefined,
+      settings.magnusPower,
+      settings.goalPlaneAngleDeg,
+    ).then(setTrajMoeById);
+  }, [getMoeSettings]);
+
+  const patchTrajMoeForGroup = useCallback((
+    groupId: string,
+    newTrajs: GeneratedTrajectory[],
+  ) => {
+    const groups = trajGroupsRef.current;
+    const group = groups.find((g) => g.id === groupId);
+    if (!group) return;
+    const { removed, recompute } = trajIdsNeedingMoeRecompute(group.trajectories, newTrajs);
+    if (removed.length === 0 && recompute.length === 0) return;
+    const settings = getMoeSettings();
+    const updatedGroup = { ...group, trajectories: newTrajs };
+
+    if (removed.length > 0) {
+      setTrajMoeById((prev) => {
+        const next = new Map(prev);
+        for (const id of removed) next.delete(id);
+        return next;
+      });
+    }
+
+    if (recompute.length > 0) {
+      setTimeout(() => {
+        setTrajMoeById((prev) => {
+          const next = new Map(prev);
+          syncGroupMoeInMap(next, updatedGroup, settings, recompute);
+          return next;
+        });
+      }, 0);
+    }
+  }, [getMoeSettings]);
+
+  const removeTrajMoeIds = useCallback((ids: string[]) => {
+    if (ids.length === 0) return;
+    setTrajMoeById((prev) => {
+      const next = new Map(prev);
+      for (const id of ids) next.delete(id);
+      return next;
+    });
+  }, []);
 
   const handleShowAllTrajGenChange = useCallback((checked: boolean) => {
     setShowAllTrajGenTrajectories(checked);
@@ -136,18 +217,28 @@ export default function App() {
     if (checked) setShowAllTrajGenTrajectories(false);
   }, []);
 
-  const handleRecalculateMoe = useCallback((errorTolerance: number) => {
-    setTrajGenParams((p) => ({ ...p, errorTolerance }));
+  const handleRecalculateMoe = useCallback((errorTolerance: number, goalPlaneAngleDeg: number) => {
+    setTrajGenParams((p) => ({ ...p, errorTolerance, goalPlaneAngleDeg }));
     const cleaned = trajGroupsRef.current.map((g) => ({
       ...g,
       biggestMOETrajectory: undefined,
-      trajectories: g.trajectories.map(({ speedMoe, angleMoe, ...t }) => t),
+      trajectories: g.trajectories.map(
+        ({ speedMoe, angleMoe, speedMoeMinus, speedMoePlus, angleMoeMinus, angleMoePlus, ...t }) => t,
+      ),
     }));
     setTrajGroups(cleaned);
     setMoeRecalculating(true);
     setMoeRecalcProgress(null);
 
-    void buildTrajectoryMoeMapAsync(cleaned, errorTolerance, true, setMoeRecalcProgress).then((map) => {
+    void buildTrajectoryMoeMapAsync(
+      cleaned,
+      errorTolerance,
+      true,
+      setMoeRecalcProgress,
+      undefined,
+      trajGenParams.magnusPower ?? 2,
+      trajGenParams.goalPlaneAngleDeg,
+    ).then((map) => {
       setTrajMoeById(map);
       setMoeRecalculating(false);
       setMoeRecalcProgress(null);
@@ -193,35 +284,14 @@ export default function App() {
   const selectedVideo = videos.find((v) => v.id === selectedId) ?? null;
   const selectedGroup = trajGroups.find(g => g.id === selectedGroupId) ?? trajGroups[0] ?? null;
 
-  useEffect(() => {
-    if (moeRecalculating) return;
-    setTrajMoeById(buildTrajectoryMoeMap(trajGroups, trajGenParams.errorTolerance, false));
-  }, [trajGroups, trajGenParams.errorTolerance, moeRecalculating]);
-
   const bestMoeTrajIds = useMemo(() => {
-    const ids = new Set<string>();
-    for (const g of trajGroups) {
-      if (
-        g.biggestMOETrajectory !== undefined &&
-        g.biggestMOETrajectory >= 0 &&
-        g.biggestMOETrajectory < g.trajectories.length
-      ) {
-        ids.add(g.trajectories[g.biggestMOETrajectory].id);
-        continue;
-      }
-      let bestId: string | null = null;
-      let bestVal = -1;
-      for (const t of g.trajectories) {
-        const moe = trajMoeById.get(t.id);
-        if (moe && moe.combinedMoe > bestVal) {
-          bestVal = moe.combinedMoe;
-          bestId = t.id;
-        }
-      }
-      if (bestId) ids.add(bestId);
-    }
-    return ids;
-  }, [trajGroups, trajMoeById]);
+    if (trajGroups.length === 0 || trajMoeById.size === 0) return new Set<string>();
+    return pickOptimalTrajectoryPath(
+      trajGroups,
+      trajMoeById,
+      optimalPickWeightsFromParams(trajGenParams),
+    );
+  }, [trajGroups, trajMoeById, trajGenParams.optimalMoeWeight, trajGenParams.optimalSpeedDerivWeight, trajGenParams.optimalAngleDerivWeight, trajGenParams.optimalSpeedSecondDerivWeight, trajGenParams.optimalAngleSecondDerivWeight]);
 
   currentFrameRef.current = selectedVideo?.currentFrame ?? 0;
   totalFramesRef.current = totalFrames;
@@ -251,6 +321,7 @@ export default function App() {
           launchParams: getLaunchParams(video.trajectoryLaunchParams, seg.id),
           pixelsPerMeter: ppm,
           framerate: fps,
+          frameTimes: video.frameTimes,
           xdir: video.xdir ?? 1,
         }));
       }),
@@ -277,6 +348,18 @@ export default function App() {
     setVideos((prev) => prev.map((v) => (v.id === id ? { ...v, ...patch } : v)));
   }
 
+  async function buildVideoFromFile(
+    file: File,
+    patch: Partial<VideoData> = {}
+  ): Promise<VideoData> {
+    const url = URL.createObjectURL(file);
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    let video = { ...makeDefaultVideo(id, file.name, url), ...patch };
+    const extracted = await extractFrameTimestamps(file);
+    if (extracted) video = applyExtractedFrameTiming(video, extracted);
+    return video;
+  }
+
   function requestUpload(files: FileList) {
     setPendingUploadFiles(Array.from(files));
   }
@@ -285,13 +368,11 @@ export default function App() {
     setPendingUploadFiles(null);
   }
 
-  function confirmUpload(xdir: XDir) {
+  async function confirmUpload(xdir: XDir) {
     if (!pendingUploadFiles?.length) return;
-    const newVideos: VideoData[] = pendingUploadFiles.map((file) => {
-      const url = URL.createObjectURL(file);
-      const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      return { ...makeDefaultVideo(id, file.name, url), xdir };
-    });
+    const newVideos = await Promise.all(
+      pendingUploadFiles.map((file) => buildVideoFromFile(file, { xdir }))
+    );
     setVideos((prev) => [...prev, ...newVideos]);
     if (!selectedId && newVideos.length > 0) setSelectedId(newVideos[0].id);
     setPendingUploadFiles(null);
@@ -368,36 +449,30 @@ export default function App() {
     setFocusedTrajectoryId(null);
   }, [selectedVideo, pushUndo, handleTrajectoryUpdate]);
 
-  const handleImportProject = useCallback((entries: ImportedProjectEntry[]) => {
-    const newVideos = entries.map((entry) => {
-      const url = URL.createObjectURL(entry.file);
-      const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      const video = makeDefaultVideo(id, entry.file.name, url);
-      if (entry.config) {
-        video.trajectory = entry.config.points;
-        if (entry.config.meterstickPoints && entry.config.meterstickPoints.length >= 2) {
-          video.meterstickPoints = horizontalizeMeterstickPoints(entry.config.meterstickPoints);
-          video.meterstickSegmentMeters = normalizeSegmentMeters(
-            video.meterstickPoints.length,
-            entry.config.meterstickSegmentMeters
-          );
-          video.meterstick = meterstickFromPoints(video.meterstickPoints, video.meterstickSegmentMeters);
-        } else if (entry.config.meterstick) {
-          video.meterstick = entry.config.meterstick;
-          video.meterstickPoints = defaultMeterstickPoints(entry.config.meterstick);
-          video.meterstickSegmentMeters = defaultSegmentMeters(video.meterstickPoints.length);
-        }
-        if (entry.config.trajectoryLaunchParams) {
-          video.trajectoryLaunchParams = entry.config.trajectoryLaunchParams;
-        }
-        video.xdir = entry.config.xdir === -1 ? -1 : 1;
-      }
-      const firstPt = firstTrajectoryPoint(video.trajectory);
-      if (firstPt) {
-        video.currentFrame = firstPt.frame;
-      }
-      return video;
-    });
+  const handleAttachConfig = useCallback((videoId: string, config: LoadedConfiguration) => {
+    setVideos((prev) =>
+      prev.map((v) => (v.id === videoId ? applyLoadedConfigurationToVideo(v, config) : v))
+    );
+    setSelectedId(videoId);
+    undoStack.current = [];
+    redoStack.current = [];
+    bumpHistory();
+    const segs = buildTrajectorySegments(config.points);
+    setFocusedTrajectoryId(segs[0]?.id ?? null);
+    setPlottingMode(false);
+  }, []);
+
+  const handleUpdateVideoXdir = useCallback((videoId: string, xdir: XDir) => {
+    updateVideo(videoId, { xdir });
+  }, []);
+
+  const handleImportProject = useCallback(async (entries: ImportedProjectEntry[]) => {
+    const newVideos = await Promise.all(
+      entries.map(async (entry) => {
+        const video = await buildVideoFromFile(entry.file);
+        return entry.config ? applyLoadedConfigurationToVideo(video, entry.config) : video;
+      })
+    );
     setVideos((prev) => {
       prev.forEach((v) => URL.revokeObjectURL(v.url));
       return newVideos;
@@ -557,6 +632,7 @@ export default function App() {
 
   function handleClearAll() {
     setTrajGroups([]);
+    setTrajMoeById(new Map());
     setSelectedGroupId(null);
     setHoveredTrajId(null);
   }
@@ -577,6 +653,7 @@ export default function App() {
     );
     if (!signal.cancelled) {
       setTrajGroups(newGroups);
+      scheduleFullMoeBuild(newGroups);
       if (newGroups.length > 0) {
         setSelectedGroupId(newGroups[0].id);
       }
@@ -586,15 +663,21 @@ export default function App() {
   }
 
   async function handleRefine() {
-    const raw = trajGroups.flatMap((g) => g.trajectories);
-    if (raw.length === 0) return;
+    const work = trajGroups.flatMap((g) =>
+      g.trajectories.map((traj) => ({
+        traj,
+        targetDx: traj.generatedForDx ?? g.dx,
+        targetDy: g.dy,
+      }))
+    );
+    if (work.length === 0) return;
     const drag = trajGenParams.dragCoefficient;
     const magnus = trajGenParams.magnusGain;
     const signal = { cancelled: false };
     setRefining(true);
     setGenProgress(null);
     const newGroups = await refineTrajectoriesAsync(
-      raw,
+      work,
       trajGenParams,
       drag,
       magnus,
@@ -603,6 +686,7 @@ export default function App() {
     );
     if (!signal.cancelled) {
       setTrajGroups(newGroups);
+      scheduleFullMoeBuild(newGroups);
       if (newGroups.length > 0) {
         const keepGroup = selectedGroupId && newGroups.some((g) => g.id === selectedGroupId);
         if (!keepGroup) setSelectedGroupId(newGroups[0].id);
@@ -616,12 +700,18 @@ export default function App() {
 
   function handleDeleteUnsuccessful() {
     setTrajGroups((prev) => {
+      const removedIds: string[] = [];
       const next = prev
-        .map((g) => ({
-          ...g,
-          trajectories: g.trajectories.filter((t) => !isUnsuccessfulTrajectory(t)),
-        }))
+        .map((g) => {
+          const kept = g.trajectories.filter((t) => !isUnsuccessfulTrajectory(t));
+          for (const t of g.trajectories) {
+            if (isUnsuccessfulTrajectory(t)) removedIds.push(t.id);
+          }
+          return { ...g, trajectories: kept };
+        })
         .filter((g) => g.trajectories.length > 0);
+
+      removeTrajMoeIds(removedIds);
 
       if (hoveredTrajId && !next.some((g) => g.trajectories.some((t) => t.id === hoveredTrajId))) {
         setHoveredTrajId(null);
@@ -640,9 +730,13 @@ export default function App() {
       if (hoveredTrajId === trajId) setHoveredTrajId(null);
       return { ...g, trajectories: next };
     }));
+    removeTrajMoeIds([trajId]);
   }
 
   function handleDeleteGroup(groupId: string) {
+    const removedIds = trajGroupsRef.current
+      .find((g) => g.id === groupId)
+      ?.trajectories.map((t) => t.id) ?? [];
     setTrajGroups(prev => {
       const next = prev.filter(g => g.id !== groupId);
       if (selectedGroupId === groupId) {
@@ -650,6 +744,7 @@ export default function App() {
       }
       return next;
     });
+    removeTrajMoeIds(removedIds);
   }
 
   return (
@@ -700,6 +795,8 @@ export default function App() {
                 width={leftWidth}
                 plottingMode={plottingMode}
                 onPlottingModeChange={setPlottingMode}
+                pointRadius={pointRadius}
+                onPointRadiusChange={setPointRadius}
                 showAllTrajectories={showAllTrajectories}
                 onShowAllTrajectoriesChange={setShowAllTrajectories}
                 showAverageTrajectory={showAverageTrajectory}
@@ -712,6 +809,8 @@ export default function App() {
                 onFrameChange={handleFrameChange}
                 framerate={selectedVideo?.framerate ?? 30}
                 onFramerateChange={handleFramerateChange}
+                totalFrames={totalFrames}
+                videoDuration={videoDuration}
                 empiricalNumPoints={selectedVideo?.empiricalNumPoints ?? 2}
                 onEmpiricalNumPointsChange={handleEmpiricalNumPointsChange}
                 meterstick={selectedVideo?.meterstick ?? { x: 80, y: 680, length: 160 }}
@@ -727,6 +826,8 @@ export default function App() {
                 onImportProject={handleImportProject}
                 importProjectActionRef={importProjectActionRef}
                 onLaunchParamsChangeForTrajectory={handleLaunchParamsChange}
+                onAttachConfig={handleAttachConfig}
+                onUpdateVideoXdir={handleUpdateVideoXdir}
               />
             </div>
 
@@ -767,7 +868,9 @@ export default function App() {
                   meterstickClipboardRef={meterstickClipboardRef}
                   onFrameChange={handleFrameChange}
                   onTotalFramesChange={setTotalFrames}
+                  onVideoDurationChange={setVideoDuration}
                   plottingMode={plottingMode}
+                  pointRadius={pointRadius}
                   showAllTrajectories={showAllTrajectories}
                   showAverageTrajectory={showAverageTrajectory}
                   showTrajectoryPoints={showTrajectoryPoints}
@@ -776,6 +879,8 @@ export default function App() {
                   onUndo={handleUndo}
                   onRedo={handleRedo}
                   onDeleteCurrentPoint={handleDeleteCurrentPoint}
+                  onSkipFrame={handleSkipFrame}
+                  canSkipFrame={canSkipFrame}
                   onStepFrame={handleStepFrame}
                   onStartFrameHold={handleStartFrameHold}
                   onStopFrameHold={handleStopFrameHold}
@@ -854,12 +959,14 @@ export default function App() {
                     launchParams: getLaunchParams(selectedVideo.trajectoryLaunchParams, seg.id),
                     pixelsPerMeter: scaleToPpmFn(MeterstickScale.fromVideo(selectedVideo)),
                     framerate: selectedVideo.framerate,
+                    frameTimes: selectedVideo.frameTimes,
                     xdir: selectedVideo.xdir ?? 1,
                   }))}
                   xdir={selectedVideo.xdir ?? 1}
                   allVideosTrajectories={allVideosTrajectories}
                   meterstickScale={selectedMeterstickScale ?? MeterstickScale.fromVideo(selectedVideo)}
                   framerate={selectedVideo.framerate}
+                  frameTimes={selectedVideo.frameTimes}
                   onLaunchParamsChange={(p) => {
                     if (activeSegment) handleLaunchParamsChange(activeSegment.id, p);
                   }}
@@ -922,6 +1029,7 @@ export default function App() {
               trajMoeById={trajMoeById}
               bestMoeTrajIds={bestMoeTrajIds}
               onHoverTraj={setHoveredTrajId}
+              onParamsChange={setTrajGenParams}
             />
 
             {/* Right edge */}
@@ -963,15 +1071,19 @@ export default function App() {
                 onDeleteTraj={handleDeleteTraj}
                 onDeleteGroup={handleDeleteGroup}
                 onUpdateGroup={(groupId, trajs) => {
+                  patchTrajMoeForGroup(groupId, trajs);
                   setTrajGroups(prev => prev.map(g => g.id === groupId ? { ...g, trajectories: trajs } : g));
                 }}
                 onImportGroups={(newGroups, mode) => {
                   if (mode === 'replace') {
                     setTrajGroups(newGroups);
+                    scheduleFullMoeBuild(newGroups);
                     setSelectedGroupId(newGroups[0]?.id ?? null);
                     setHoveredTrajId(null);
                   } else {
-                    setTrajGroups((prev) => [...prev, ...newGroups]);
+                    const merged = [...trajGroupsRef.current, ...newGroups];
+                    setTrajGroups(merged);
+                    scheduleFullMoeBuild(merged);
                     setSelectedGroupId((id) => id ?? newGroups[0]?.id ?? null);
                   }
                 }}
@@ -991,6 +1103,7 @@ export default function App() {
 
       {pendingUploadFiles && tab === 'sysid' && (
         <XdirUploadDialog
+          mode="upload"
           fileCount={pendingUploadFiles.length}
           onSubmit={confirmUpload}
           onCancel={cancelPendingUpload}

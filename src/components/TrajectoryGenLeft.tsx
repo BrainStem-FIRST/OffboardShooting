@@ -1,12 +1,14 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { TrajGenParams } from '../types';
-import { countTrajGenCombinations, type TrajGenProgress } from '../simulation';
-import { Play, Loader, RefreshCw } from 'lucide-react';
+import { countTrajGenSearchSteps, type TrajGenProgress } from '../simulation';
+import { Play, Loader, RefreshCw, Save, Upload } from 'lucide-react';
+import { CheckboxLabel } from './Checkbox';
 import {
   panelAside, panelContent, panelSectionTitle, panelSubsectionTitle, panelLabel,
   panelLabelInline, panelInput, panelBody, panelHint, panelBtnPrimary, panelMeta,
 } from './panelStyles';
 import { ProgressBar } from './ProgressBar';
+import { downloadTrajGenSettings, parseTrajGenSettings } from '../utils/trajGenSettingsIO';
 
 interface Props {
   params: TrajGenParams;
@@ -211,18 +213,35 @@ export default function TrajectoryGenLeft({
   params, onChange, onGenerate, onRefine,
   generating, refining, canRefine, genProgress, width,
 }: Props) {
+  const importInputRef = useRef<HTMLInputElement>(null);
+  const [settingsStatus, setSettingsStatus] = useState<{ ok: boolean; text: string } | null>(null);
+
   function set<K extends keyof TrajGenParams>(key: K, val: TrajGenParams[K]) {
     onChange({ ...params, [key]: val });
   }
 
-  // Compute distance values that will be generated
-  const dxValues: number[] = [];
-  {
-    let dx = params.dxMin;
-    while (dx <= params.dxMax + 1e-9) {
-      dxValues.push(Math.round(dx * 1e6) / 1e6);
-      dx = Math.round((dx + params.dxStep) * 1e6) / 1e6;
-    }
+  function handleSaveSettings() {
+    downloadTrajGenSettings(params);
+    setSettingsStatus({ ok: true, text: 'Settings saved to trajgen_settings.json.' });
+  }
+
+  function handleImportFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+    setSettingsStatus(null);
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const imported = parseTrajGenSettings(ev.target?.result as string);
+      if (!imported) {
+        setSettingsStatus({ ok: false, text: 'Invalid settings file. Expected trajgen_settings.json format.' });
+        return;
+      }
+      onChange(imported);
+      setSettingsStatus({ ok: true, text: `Loaded settings from ${file.name}.` });
+    };
+    reader.onerror = () => setSettingsStatus({ ok: false, text: 'Failed to read file.' });
+    reader.readAsText(file);
   }
 
   const busy = generating || refining;
@@ -245,13 +264,6 @@ export default function TrajectoryGenLeft({
           />
           <NumInput label="Distance Step" unit="m" value={params.dxStep} step={0.01} min={0.01}
             onChange={(v) => onChange({ ...params, dxStep: Math.max(0.1, v) })} />
-          {dxValues.length > 0 && (
-            <p className={panelHint}>
-              {dxValues.length === 1
-                ? `1 distance: ${dxValues[0].toFixed(2)} m`
-                : `${dxValues.length} distances: ${dxValues[0].toFixed(2)} → ${dxValues[dxValues.length - 1].toFixed(2)} m`}
-            </p>
-          )}
           <NumInput label="Height Offset (dy)" unit="m" value={params.dy} step={0.1}
             onChange={(v) => set('dy', v)} />
           <NumInput label="Drag Coefficient" value={params.dragCoefficient} step={0.01} min={0} max={0.2}
@@ -306,6 +318,23 @@ export default function TrajectoryGenLeft({
         </div>
 
         {/* Generate / Refine */}
+        <CheckboxLabel
+          checked={params.regeneratePerDistanceStep}
+          onChange={(checked) => set('regeneratePerDistanceStep', checked)}
+          disabled={busy}
+          label="Regenerate per distance step"
+        />
+        {params.regeneratePerDistanceStep && (
+          <NumInput
+            label="Error Tolerance"
+            unit="m"
+            value={params.perDistanceErrorTolerance}
+            step={0.01}
+            min={0.01}
+            onChange={(v) => set('perDistanceErrorTolerance', Math.max(0.01, v))}
+          />
+        )}
+
         <button
           onClick={onGenerate}
           disabled={busy}
@@ -332,6 +361,47 @@ export default function TrajectoryGenLeft({
           {refining ? 'Refining…' : 'Refine Trajectories'}
         </button>
 
+        <input
+          ref={importInputRef}
+          type="file"
+          accept=".json,application/json"
+          className="hidden"
+          onChange={handleImportFile}
+        />
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={handleSaveSettings}
+            disabled={busy}
+            className={`${panelBtnPrimary} font-semibold ${
+              busy
+                ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
+                : 'bg-gray-700 hover:bg-gray-600 text-white'
+            }`}
+          >
+            <Save size={14} />
+            Save Settings
+          </button>
+          <button
+            type="button"
+            onClick={() => { setSettingsStatus(null); importInputRef.current?.click(); }}
+            disabled={busy}
+            className={`${panelBtnPrimary} font-semibold ${
+              busy
+                ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
+                : 'bg-gray-700 hover:bg-gray-600 text-white'
+            }`}
+          >
+            <Upload size={14} />
+            Import Settings
+          </button>
+        </div>
+        {settingsStatus && (
+          <p className={`text-sm ${settingsStatus.ok ? 'text-green-400' : 'text-red-400'}`}>
+            {settingsStatus.text}
+          </p>
+        )}
+
         {busy && (
           <ProgressBar
             progress={genProgress?.progress ?? 0}
@@ -348,7 +418,7 @@ export default function TrajectoryGenLeft({
         )}
 
         <p className={`${panelHint} text-center tabular-nums`}>
-          {countTrajGenCombinations(params).toLocaleString()} Combinations
+          {countTrajGenSearchSteps(params).toLocaleString()} Combinations
         </p>
       </div>
     </aside>

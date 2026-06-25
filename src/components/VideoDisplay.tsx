@@ -2,7 +2,8 @@ import { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { VideoData, TrajectoryPoint, MeterstickPoint, MeterstickClipboard } from '../types';
 import { simulateShot, gravityCorrectedPoints, interpSimAtTime, SIM_MAX_TIME, SIM_DT } from '../simulation';
-import { buildTrajectorySegments, activeSegmentAtFrame, resolveActiveSegment, firstTrajectoryPoint, averageTrajectoryFromSegments, getLaunchParams, plottedPathSegments, plottedPoints, isSkippedPoint } from '../utils/trajectorySegments';
+import { buildTrajectorySegments, activeSegmentAtFrame, resolveActiveSegment, firstTrajectoryPoint, averageTrajectoryFromSegments, getLaunchParams, plottedPathSegments, plottedPoints, isSkippedPoint, segmentsWithinLabelGap } from '../utils/trajectorySegments';
+import { deltaTimeAtFrame, elapsedSeconds, getFrameTimes, irregularFrameIndices, seekTimeAtFrame } from '../utils/frameTiming';
 import { MeterstickScale, scaleToPpmFn, formatSegmentMetersLabel, parseSegmentMetersInput } from '../utils/meterstickScale';
 import {
   hitMultiMeterstick,
@@ -24,7 +25,9 @@ interface Props {
   meterstickClipboardRef: React.MutableRefObject<MeterstickClipboard | null>;
   onFrameChange: (frame: number) => void;
   onTotalFramesChange: (total: number) => void;
+  onVideoDurationChange: (durationSec: number) => void;
   plottingMode: boolean;
+  pointRadius: number;
   showAllTrajectories: boolean;
   showAverageTrajectory: boolean;
   showTrajectoryPoints: boolean;
@@ -33,6 +36,8 @@ interface Props {
   onUndo: () => void;
   onRedo: () => void;
   onDeleteCurrentPoint: () => void;
+  onSkipFrame: () => void;
+  canSkipFrame: boolean;
   onStepFrame: (delta: number) => void;
   onStartFrameHold: (dir: number) => void;
   onStopFrameHold: () => void;
@@ -93,7 +98,9 @@ export default function VideoDisplay({
   meterstickClipboardRef,
   onFrameChange,
   onTotalFramesChange,
+  onVideoDurationChange,
   plottingMode,
+  pointRadius,
   showAllTrajectories,
   showAverageTrajectory,
   showTrajectoryPoints,
@@ -102,6 +109,8 @@ export default function VideoDisplay({
   onUndo,
   onRedo,
   onDeleteCurrentPoint,
+  onSkipFrame,
+  canSkipFrame,
   onStepFrame,
   onStartFrameHold,
   onStopFrameHold,
@@ -111,7 +120,7 @@ export default function VideoDisplay({
   const containerRef = useRef<HTMLDivElement>(null);
 
   const [duration, setDuration] = useState(0);
-  const [fps] = useState(30);
+  const frameTimes = useMemo(() => getFrameTimes(video, duration), [video, duration]);
   const [stickSelected, setStickSelected] = useState(false);
   const [multiDragging, setMultiDragging] = useState(false);
   const [hoverCanvasPos, setHoverCanvasPos] = useState<{ x: number; y: number } | null>(null);
@@ -142,6 +151,7 @@ export default function VideoDisplay({
   const didPanRef = useRef(false);
   const scrubTrackRef = useRef<HTMLDivElement>(null);
   const totalFramesRef = useRef(1);
+  const lastSeekedFrameRef = useRef(-1);
   const zoomRef = useRef(1);
   const panRef = useRef({ x: 0, y: 0 });
 
@@ -157,13 +167,14 @@ export default function VideoDisplay({
   const visibleSegments = useMemo(() => {
     if (showAllTrajectories) return segments;
     const active = resolveActiveSegment(segments, video.currentFrame, focusedTrajectoryId);
-    return active ? [active] : [];
+    if (!active) return [];
+    return segmentsWithinLabelGap(segments, active);
   }, [segments, showAllTrajectories, video.currentFrame, focusedTrajectoryId]);
 
   const averagePoints = useMemo(() => {
     if (!showAverageTrajectory) return [];
-    return averageTrajectoryFromSegments(segments, video.framerate);
-  }, [showAverageTrajectory, segments, video.framerate]);
+    return averageTrajectoryFromSegments(segments, video.framerate, video.frameTimes);
+  }, [showAverageTrajectory, segments, video.framerate, video.frameTimes]);
 
   const activeSegment = useMemo(
     () => resolveActiveSegment(segments, video.currentFrame, focusedTrajectoryId),
@@ -182,9 +193,16 @@ export default function VideoDisplay({
     [simulationPoints]
   );
 
-  const totalFrames = Math.max(1, Math.round(duration * fps));
+  const totalFrames = frameTimes.length;
   totalFramesRef.current = totalFrames;
   const progressPercent = totalFrames > 1 ? (video.currentFrame / (totalFrames - 1)) * 100 : 0;
+  const frameDeltaSec = deltaTimeAtFrame(video, video.currentFrame, duration);
+  const frameDeltaLabel =
+    frameDeltaSec !== null ? `Δt ${(frameDeltaSec * 1000).toFixed(1)} ms` : null;
+  const irregularFrames = useMemo(
+    () => irregularFrameIndices(video.frameTimes, video.framerate),
+    [video.frameTimes, video.framerate]
+  );
   const activeScrubSegment = activeSegmentAtFrame(segments, video.currentFrame);
   const isCurrentFrameSkipped = video.trajectory.some(
     (p) => p.frame === video.currentFrame && p.skipped
@@ -197,6 +215,7 @@ export default function VideoDisplay({
     setPan({ x: 0, y: 0 });
     setStickSelected(false);
     setContextMenu(null);
+    lastSeekedFrameRef.current = -1;
   }, [video.id]);
 
   function nearMeterstick(mx: number, my: number): boolean {
@@ -247,11 +266,28 @@ export default function VideoDisplay({
   }, [totalFrames, onTotalFramesChange]);
 
   useEffect(() => {
+    onVideoDurationChange(duration);
+  }, [duration, onVideoDurationChange]);
+
+  useEffect(() => {
+    const maxFrame = totalFrames - 1;
+    if (video.currentFrame > maxFrame) onFrameChange(maxFrame);
+  }, [totalFrames, video.currentFrame, onFrameChange]);
+
+  useEffect(() => {
     const vid = videoRef.current;
-    if (!vid || duration === 0) return;
-    const target = video.currentFrame / fps;
-    if (Math.abs(vid.currentTime - target) > 0.5 / fps) vid.currentTime = target;
-  }, [video.currentFrame, fps, duration]);
+    if (!vid || duration === 0 || frameTimes.length === 0) return;
+    const target = seekTimeAtFrame(video, video.currentFrame, duration);
+    const prevDelta =
+      video.currentFrame > 0 ? frameTimes[video.currentFrame] - frameTimes[video.currentFrame - 1] : null;
+    const threshold = prevDelta !== null && prevDelta > 0 ? Math.min(0.5 / 30, prevDelta * 0.25) : 0.5 / 30;
+    const frameChanged = lastSeekedFrameRef.current !== video.currentFrame;
+    const seekSkipped = !frameChanged && Math.abs(vid.currentTime - target) <= threshold;
+    if (!seekSkipped) {
+      vid.currentTime = target;
+      lastSeekedFrameRef.current = video.currentFrame;
+    }
+  }, [video, video.currentFrame, duration, frameTimes]);
 
   function handleMetadata() {
     const vid = videoRef.current;
@@ -576,6 +612,7 @@ export default function VideoDisplay({
       if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) { e.preventDefault(); onUndo(); }
       if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); onRedo(); }
       if (e.key === 'Delete') { e.preventDefault(); onDeleteCurrentPoint(); }
+      if (key === 'r' && canSkipFrame) { e.preventDefault(); onSkipFrame(); }
       if (key === 'w' || key === 'a' || key === 's' || key === 'd') {
         const dxCm = key === 'a' ? -1 : key === 'd' ? 1 : 0;
         const dyCm = key === 'w' ? -1 : key === 's' ? 1 : 0;
@@ -599,7 +636,7 @@ export default function VideoDisplay({
     }
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [onStepFrame, onUndo, onRedo, onDeleteCurrentPoint, fineAdjustCurrentPoint, stickSelected, video.meterstickPoints, video.meterstickSegmentMeters, meterstickClipboardRef, onMeterstickPaste]);
+  }, [onStepFrame, onUndo, onRedo, onDeleteCurrentPoint, onSkipFrame, canSkipFrame, fineAdjustCurrentPoint, stickSelected, video.meterstickPoints, video.meterstickSegmentMeters, meterstickClipboardRef, onMeterstickPaste]);
 
   const drawRef = useRef<() => void>(() => {});
 
@@ -631,7 +668,7 @@ export default function VideoDisplay({
         sorted.forEach((pt) => {
           if (isSkippedPoint(pt)) return;
           const isActive = pt.frame === video.currentFrame;
-          const r = isActive ? 11 : 5;
+          const r = isActive ? pointRadius * 1.3 : pointRadius;
           ctx.beginPath();
           ctx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
           ctx.fillStyle = seg.color;
@@ -641,7 +678,7 @@ export default function VideoDisplay({
           ctx.stroke();
           if (isActive) {
             ctx.beginPath();
-            ctx.arc(pt.x, pt.y, 2.5, 0, Math.PI * 2);
+            ctx.arc(pt.x, pt.y, pointRadius * 0.5, 0, Math.PI * 2);
             ctx.fillStyle = 'white';
             ctx.fill();
           }
@@ -649,9 +686,9 @@ export default function VideoDisplay({
       }
 
       const plottedSorted = plottedPoints(sorted);
-      if (scaleReady && video.framerate > 0 && plottedSorted.length >= 2) {
+      if (scaleReady && plottedSorted.length >= 2 && (video.frameTimes?.length || video.framerate > 0)) {
         const subset = plottedSorted.slice(0, Math.min(numPointsForEstimate, plottedSorted.length));
-        const corrected = gravityCorrectedPoints(subset, ppmSource, video.framerate);
+        const corrected = gravityCorrectedPoints(subset, ppmSource, video.framerate, video.frameTimes);
         if (corrected.length >= 2) {
           ctx.beginPath();
           corrected.forEach((pt, i) => { if (i === 0) ctx.moveTo(pt.x, pt.y); else ctx.lineTo(pt.x, pt.y); });
@@ -664,7 +701,7 @@ export default function VideoDisplay({
         if (showTrajectoryPoints) {
           corrected.forEach((pt) => {
             ctx.beginPath();
-            ctx.arc(pt.x, pt.y, 4, 0, Math.PI * 2);
+            ctx.arc(pt.x, pt.y, pointRadius * 0.8, 0, Math.PI * 2);
             ctx.fillStyle = 'rgba(156, 163, 175, 0.85)';
             ctx.fill();
             ctx.strokeStyle = 'rgba(75, 85, 99, 0.9)';
@@ -712,8 +749,8 @@ export default function VideoDisplay({
       ctx.stroke();
       ctx.setLineDash([]);
 
-      if (video.framerate > 0) {
-        const t = (video.currentFrame - launchPoint.frame) / video.framerate;
+      if (video.frameTimes?.length || video.framerate > 0) {
+        const t = elapsedSeconds(video.frameTimes, video.framerate, video.currentFrame, launchPoint.frame);
         const pos = interpSimAtTime(simPts, t, SIM_DT);
         if (pos) {
           const mx = launchPoint.x + xdir * pos.x * ppmLaunch;
@@ -776,7 +813,7 @@ export default function VideoDisplay({
         ctx.shadowBlur = 0;
       }
     }
-  }, [video, stickSelected, meterstickHovered, multiDragging, hoverCanvasPos, meterstickScale, visibleSegments, averagePoints, showTrajectoryPoints, launchPoint, launchParams]);
+  }, [video, stickSelected, meterstickHovered, multiDragging, hoverCanvasPos, meterstickScale, visibleSegments, averagePoints, showTrajectoryPoints, launchPoint, launchParams, pointRadius]);
 
   useEffect(() => { drawRef.current = draw; draw(); }, [draw]);
 
@@ -873,54 +910,73 @@ export default function VideoDisplay({
           className="relative px-2 py-2 cursor-pointer select-none"
           onMouseDown={handleScrubMouseDown}
         >
-          <div
-            ref={scrubTrackRef}
-            className="relative h-2.5 bg-gray-700 rounded-full overflow-hidden"
-          >
-            {segments.map((seg) => {
-              const { left, width } = scrubSegmentStyle(seg.frameStart, seg.frameEnd, totalFrames);
-              const isActive = activeScrubSegment?.id === seg.id;
-              return (
+          {irregularFrames.length > 0 && (
+            <div className="relative h-2 mb-1 pointer-events-none">
+              {irregularFrames.map((frameIdx) => (
                 <div
-                  key={seg.id}
-                  className="absolute top-0 h-full pointer-events-none transition-opacity"
+                  key={frameIdx}
+                  className="absolute bottom-0 w-1.5 h-1.5 bg-white rounded-full -translate-x-1/2 shadow-sm"
                   style={{
-                    left,
-                    width,
-                    backgroundColor: seg.color,
-                    opacity: isActive ? 1 : 0.85,
+                    left: totalFrames > 1 ? `${(frameIdx / (totalFrames - 1)) * 100}%` : '0%',
                   }}
-                  title={`${seg.name} · frames ${seg.frameStart + 1}–${seg.frameEnd + 1}`}
+                  title={`Frame ${frameIdx + 1}: irregular Δt vs ${video.framerate.toFixed(1)} fps`}
                 />
-              );
-            })}
-            {segments.flatMap((seg) =>
-              seg.points.filter(isSkippedPoint).map((pt) => {
-                const { left, width } = scrubSegmentStyle(pt.frame, pt.frame, totalFrames);
+              ))}
+            </div>
+          )}
+          <div className="relative">
+            <div
+              ref={scrubTrackRef}
+              className="relative h-2.5 bg-gray-700 rounded-full overflow-hidden"
+            >
+              {segments.map((seg) => {
+                const { left, width } = scrubSegmentStyle(seg.frameStart, seg.frameEnd, totalFrames);
                 const isActive = activeScrubSegment?.id === seg.id;
                 return (
                   <div
-                    key={`${seg.id}-skip-${pt.frame}`}
-                    className="absolute top-0 h-full pointer-events-none"
+                    key={seg.id}
+                    className="absolute top-0 h-full pointer-events-none transition-opacity"
                     style={{
                       left,
                       width,
-                      backgroundColor: darkenHex(seg.color, 0.45),
-                      opacity: isActive ? 1 : 0.9,
-                      zIndex: 1,
+                      backgroundColor: seg.color,
+                      opacity: isActive ? 1 : 0.85,
                     }}
-                    title={`${seg.name} · frame ${pt.frame + 1} skipped`}
+                    title={`${seg.name} · frames ${seg.frameStart + 1}–${seg.frameEnd + 1}`}
                   />
                 );
-              })
-            )}
+              })}
+              {segments.flatMap((seg) =>
+                seg.points.filter(isSkippedPoint).map((pt) => {
+                  const { left, width } = scrubSegmentStyle(pt.frame, pt.frame, totalFrames);
+                  const isActive = activeScrubSegment?.id === seg.id;
+                  return (
+                    <div
+                      key={`${seg.id}-skip-${pt.frame}`}
+                      className="absolute top-0 h-full pointer-events-none"
+                      style={{
+                        left,
+                        width,
+                        backgroundColor: darkenHex(seg.color, 0.45),
+                        opacity: isActive ? 1 : 0.9,
+                        zIndex: 1,
+                      }}
+                      title={`${seg.name} · frame ${pt.frame + 1} skipped`}
+                    />
+                  );
+                })
+              )}
+            </div>
+            <div
+              className="absolute top-1/2 -translate-y-1/2 w-3.5 h-3.5 bg-white rounded-full shadow-md border-2 border-gray-900 -translate-x-1/2 z-10 pointer-events-none"
+              style={{ left: `${progressPercent}%` }}
+            />
           </div>
-          <div
-            className="absolute top-1/2 -translate-y-1/2 w-3.5 h-3.5 bg-white rounded-full shadow-md border-2 border-gray-900 -translate-x-1/2 z-10 pointer-events-none"
-            style={{ left: `calc(0.5rem + (100% - 1rem) * ${progressPercent / 100})` }}
-          />
         </div>
         <div className="flex items-center justify-center gap-3 mt-2">
+          <span className="text-[10px] text-gray-500 font-mono tabular-nums min-w-[5rem] text-right shrink-0">
+            {frameDeltaLabel ?? ''}
+          </span>
           <button
             onMouseDown={(e) => { e.preventDefault(); onStartFrameHold(-1); }}
             onMouseUp={onStopFrameHold}
@@ -934,9 +990,11 @@ export default function VideoDisplay({
             <span className="text-xs text-gray-400 font-mono tabular-nums leading-none">
               Frame {video.currentFrame + 1} / {totalFrames}
             </span>
-            <span className="text-[10px] text-gray-500 leading-none h-3 flex items-center justify-center">
-              {isCurrentFrameSkipped ? 'skipped' : null}
-            </span>
+            {isCurrentFrameSkipped && (
+              <span className="text-[10px] text-gray-500 leading-none h-3 flex items-center justify-center">
+                skipped
+              </span>
+            )}
           </div>
           <button
             onMouseDown={(e) => { e.preventDefault(); onStartFrameHold(1); }}

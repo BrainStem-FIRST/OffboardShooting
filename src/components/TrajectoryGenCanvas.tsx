@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { TrajGenParams, TrajGroup, GeneratedTrajectory } from '../types';
-import { simulateShot, SIM_MAX_TIME, SIM_DT, enumerateDxValues, type TrajectoryMoe } from '../simulation';
+import { simulateShot, SIM_MAX_TIME, SIM_DT, enumerateDxValues, resolveMagnusPower, goalPlaneSegment, formatMoeBounds, type TrajectoryMoe } from '../simulation';
 
 interface Props {
   params: TrajGenParams;
@@ -24,16 +24,22 @@ interface HitPolyline {
   id: string;
   points: [number, number][];
   traj: GeneratedTrajectory;
+  dx: number;
+  dy: number;
 }
 
 interface CanvasTooltip {
   x: number;
   y: number;
+  dx: number;
+  dy: number;
   exitVelocity: number;
   exitAngle: number;
   timeOfFlight: number;
-  speedMoe: number | null;
-  angleMoe: number | null;
+  speedMoeMinus: number | null;
+  speedMoePlus: number | null;
+  angleMoeMinus: number | null;
+  angleMoePlus: number | null;
 }
 
 const INIT_ZOOM = 80;
@@ -210,20 +216,46 @@ export default function TrajectoryGenCanvas({
       }
     }
 
-    const activeMagnusPower = params.magnusPower ?? 2;
+    if (params.showGoalPlanes && groups.length > 0) {
+      const half = params.errorTolerance / 2;
+      const planeGroups = showAll
+        ? groups
+        : selectedGroup
+        ? [selectedGroup]
+        : [];
 
-    type TrajDrawEntry = { traj: GeneratedTrajectory; drag: number; magnus: number };
+      for (const g of planeGroups) {
+        const isSelected = selectedGroup?.id === g.id;
+        const seg = goalPlaneSegment(g.dx, g.dy, half, params.goalPlaneAngleDeg);
+        const [x1, y1] = toS(seg.x1, seg.y1);
+        const [x2, y2] = toS(seg.x2, seg.y2);
+        ctx.strokeStyle = isSelected ? 'rgba(251, 191, 36, 0.95)' : 'rgba(251, 191, 36, 0.55)';
+        ctx.lineWidth = isSelected ? 3 : 2;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+        ctx.lineCap = 'butt';
+      }
+    }
+
+    const activeMagnusPower = resolveMagnusPower(params.magnusPower);
+
+    type TrajDrawEntry = { traj: GeneratedTrajectory; drag: number; magnus: number; dx: number; dy: number };
     const trajEntries: TrajDrawEntry[] = showBiggestMoe
       ? groups.flatMap((g) => {
           const best = g.trajectories.find((t) => bestMoeTrajIds.has(t.id));
-          return best ? [{ traj: best, drag: g.drag, magnus: g.magnus }] : [];
+          return best ? [{ traj: best, drag: g.drag, magnus: g.magnus, dx: g.dx, dy: g.dy }] : [];
         })
       : showAll
-      ? groups.flatMap((g) => g.trajectories.map((traj) => ({ traj, drag: g.drag, magnus: g.magnus })))
+      ? groups.flatMap((g) => g.trajectories.map((traj) => ({ traj, drag: g.drag, magnus: g.magnus, dx: g.dx, dy: g.dy })))
       : (selectedGroup?.trajectories ?? []).map((traj) => ({
           traj,
           drag: selectedGroup!.drag,
           magnus: selectedGroup!.magnus,
+          dx: selectedGroup!.dx,
+          dy: selectedGroup!.dy,
         }));
 
     const polylines: HitPolyline[] = [];
@@ -232,6 +264,8 @@ export default function TrajectoryGenCanvas({
       traj: GeneratedTrajectory,
       drag: number,
       magnus: number,
+      dx: number,
+      dy: number,
       strokeStyle: string,
       lineWidth: number
     ) {
@@ -250,24 +284,24 @@ export default function TrajectoryGenCanvas({
       ctx.lineWidth = lineWidth;
       ctx.stroke();
       if (screenPts.length >= 2) {
-        polylines.push({ id: traj.id, points: screenPts, traj });
+        polylines.push({ id: traj.id, points: screenPts, traj, dx, dy });
       }
     }
 
-    for (const { traj, drag, magnus } of trajEntries) {
+    for (const { traj, drag, magnus, dx, dy } of trajEntries) {
       if (traj.id === hoveredId || bestMoeTrajIds.has(traj.id)) continue;
-      drawTraj(traj, drag, magnus, TRAJ_COLOR, 1);
+      drawTraj(traj, drag, magnus, dx, dy, TRAJ_COLOR, 1);
     }
 
-    for (const { traj, drag, magnus } of trajEntries) {
+    for (const { traj, drag, magnus, dx, dy } of trajEntries) {
       if (bestMoeTrajIds.has(traj.id) && traj.id !== hoveredId) {
-        drawTraj(traj, drag, magnus, TRAJ_MAX_MOE_COLOR, 2);
+        drawTraj(traj, drag, magnus, dx, dy, TRAJ_MAX_MOE_COLOR, 2);
       }
     }
 
     if (hoveredId) {
       const hovered = trajEntries.find((e) => e.traj.id === hoveredId);
-      if (hovered) drawTraj(hovered.traj, hovered.drag, hovered.magnus, TRAJ_HOVER_COLOR, 2);
+      if (hovered) drawTraj(hovered.traj, hovered.drag, hovered.magnus, hovered.dx, hovered.dy, TRAJ_HOVER_COLOR, 2);
     }
 
     hitPolylinesRef.current = polylines;
@@ -316,11 +350,15 @@ export default function TrajectoryGenCanvas({
       setTooltip({
         x: clientX - containerRect.left,
         y: clientY - containerRect.top,
+        dx: hit.dx,
+        dy: hit.dy,
         exitVelocity: hit.traj.exitVelocity,
         exitAngle: hit.traj.exitAngle,
         timeOfFlight: hit.traj.timeOfFlight,
-        speedMoe: moe?.speedMoe ?? null,
-        angleMoe: moe?.angleMoe ?? null,
+        speedMoeMinus: moe?.speedMoeMinus ?? null,
+        speedMoePlus: moe?.speedMoePlus ?? null,
+        angleMoeMinus: moe?.angleMoeMinus ?? null,
+        angleMoePlus: moe?.angleMoePlus ?? null,
       });
     } else {
       setTooltip(null);
@@ -408,8 +446,25 @@ export default function TrajectoryGenCanvas({
           className="absolute z-10 pointer-events-none px-2.5 py-1.5 rounded bg-gray-900 border border-gray-600 text-xs shadow-lg tabular-nums space-y-0.5"
           style={{ left: tooltip.x + 12, top: tooltip.y + 12 }}
         >
-          <div className="text-gray-300">Speed <span className="text-white font-mono">{tooltip.exitVelocity.toFixed(3)} m/s</span>{tooltip.speedMoe !== null && <span className="text-gray-500 font-mono"> ±{tooltip.speedMoe.toFixed(3)}</span>}</div>
-          <div className="text-gray-300">Exit angle <span className="text-white font-mono">{tooltip.exitAngle.toFixed(2)}°</span>{tooltip.angleMoe !== null && <span className="text-gray-500 font-mono"> ±{tooltip.angleMoe.toFixed(2)}°</span>}</div>
+          <div className="text-gray-300">
+            Goal <span className="text-white font-mono">({tooltip.dx.toFixed(3)}, {tooltip.dy.toFixed(3)}) m</span>
+          </div>
+          <div className="text-gray-300">
+            Speed <span className="text-white font-mono">{tooltip.exitVelocity.toFixed(3)} m/s</span>
+            {tooltip.speedMoeMinus !== null && tooltip.speedMoePlus !== null && (
+              <span className="text-gray-500 font-mono">
+                {' '}{formatMoeBounds(tooltip.speedMoeMinus, tooltip.speedMoePlus, 3)}
+              </span>
+            )}
+          </div>
+          <div className="text-gray-300">
+            Exit angle <span className="text-white font-mono">{tooltip.exitAngle.toFixed(2)}°</span>
+            {tooltip.angleMoeMinus !== null && tooltip.angleMoePlus !== null && (
+              <span className="text-gray-500 font-mono">
+                {' '}{formatMoeBounds(tooltip.angleMoeMinus, tooltip.angleMoePlus, 2, '°')}
+              </span>
+            )}
+          </div>
           <div className="text-gray-300">ToF <span className="text-white font-mono">{tooltip.timeOfFlight.toFixed(3)} s</span></div>
         </div>
       )}

@@ -2,21 +2,34 @@ import { useState } from 'react';
 import type { XDir } from '../types';
 import { panelBtnPrimary, panelHint, panelItemTitle, panelSectionTitle } from './panelStyles';
 
-interface Props {
-  fileCount: number;
+type Props = {
   onSubmit: (xdir: XDir) => void;
   onCancel: () => void;
-}
+} & (
+  | { mode?: 'upload'; fileCount: number }
+  | { mode: 'edit'; videoName: string; initialXdir: XDir }
+);
 
-export default function XdirUploadDialog({ fileCount, onSubmit, onCancel }: Props) {
-  const [xdir, setXdir] = useState<XDir>(1);
+export default function XdirUploadDialog(props: Props) {
+  const { onSubmit, onCancel } = props;
+  const isEdit = props.mode === 'edit';
+  const initialXdir = isEdit ? props.initialXdir : 1;
+  const [xdir, setXdir] = useState<XDir>(initialXdir);
+
+  const title = isEdit ? 'Edit video settings' : 'Trajectory direction';
+  const description = isEdit
+    ? `Which way does the projectile travel in "${props.videoName}"?`
+    : props.fileCount === 1
+      ? 'Which way does the projectile travel in this video?'
+      : `Which way do the projectiles travel in these ${props.fileCount} videos?`;
+  const submitLabel = isEdit ? 'Save' : `Add video${props.fileCount !== 1 ? 's' : ''}`;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <button
         type="button"
         className="absolute inset-0 bg-black/60"
-        aria-label="Cancel upload"
+        aria-label={isEdit ? 'Cancel' : 'Cancel upload'}
         onClick={onCancel}
       />
       <div
@@ -26,12 +39,10 @@ export default function XdirUploadDialog({ fileCount, onSubmit, onCancel }: Prop
         className="relative w-full max-w-sm rounded-xl border border-gray-600 bg-gray-900 p-5 shadow-xl"
       >
         <h2 id="xdir-upload-title" className={`${panelItemTitle} mb-1`}>
-          Trajectory direction
+          {title}
         </h2>
         <p className={`${panelHint} mb-4`}>
-          {fileCount === 1
-            ? 'Which way does the projectile travel in this video?'
-            : `Which way do the projectiles travel in these ${fileCount} videos?`}
+          {description}
         </p>
 
         <p className={`${panelSectionTitle} mb-2`}>Shooting direction</p>
@@ -73,7 +84,7 @@ export default function XdirUploadDialog({ fileCount, onSubmit, onCancel }: Prop
             onClick={() => onSubmit(xdir)}
             className={`flex-1 ${panelBtnPrimary} bg-blue-600 hover:bg-blue-500 text-white`}
           >
-            Add video{fileCount !== 1 ? 's' : ''}
+            {submitLabel}
           </button>
         </div>
       </div>

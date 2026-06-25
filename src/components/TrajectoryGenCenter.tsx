@@ -3,10 +3,9 @@ import { TrajGenParams, TrajGroup } from '../types';
 import type { TrajectoryMoe } from '../simulation';
 import { panelTab } from './panelStyles';
 import TrajectoryGenCanvas from './TrajectoryGenCanvas';
-import TrajectoryMoeAnalysis from './TrajectoryMoeAnalysis';
-import TrajectoryDerivativeAnalysis from './TrajectoryDerivativeAnalysis';
+import TrajectoryOptimalAnalysis from './TrajectoryOptimalAnalysis';
 
-type CenterTab = 'visualizer' | 'moeAnalysis' | 'derivativeAnalysis';
+type CenterTab = 'visualizer' | 'optimalAnalysis';
 
 interface Props {
   params: TrajGenParams;
@@ -18,12 +17,12 @@ interface Props {
   trajMoeById: Map<string, TrajectoryMoe>;
   bestMoeTrajIds: Set<string>;
   onHoverTraj: (id: string | null) => void;
+  onParamsChange: (params: TrajGenParams) => void;
 }
 
 const TABS: { id: CenterTab; label: string }[] = [
   { id: 'visualizer', label: 'Trajectory Visualizer' },
-  { id: 'moeAnalysis', label: 'MOE Analysis' },
-  { id: 'derivativeAnalysis', label: 'Derivative Analysis' },
+  { id: 'optimalAnalysis', label: 'Optimal Analysis' },
 ];
 
 export default function TrajectoryGenCenter({
@@ -36,6 +35,7 @@ export default function TrajectoryGenCenter({
   trajMoeById,
   bestMoeTrajIds,
   onHoverTraj,
+  onParamsChange,
 }: Props) {
   const [centerTab, setCenterTab] = useState<CenterTab>('visualizer');
 
@@ -67,17 +67,13 @@ export default function TrajectoryGenCenter({
             onHoverTraj={onHoverTraj}
           />
         )}
-        {centerTab === 'moeAnalysis' && (
-          <TrajectoryMoeAnalysis
+        {centerTab === 'optimalAnalysis' && (
+          <TrajectoryOptimalAnalysis
             groups={groups}
+            params={params}
             trajMoeById={trajMoeById}
             bestMoeTrajIds={bestMoeTrajIds}
-          />
-        )}
-        {centerTab === 'derivativeAnalysis' && (
-          <TrajectoryDerivativeAnalysis
-            groups={groups}
-            bestMoeTrajIds={bestMoeTrajIds}
+            onParamsChange={onParamsChange}
           />
         )}
       </div>
