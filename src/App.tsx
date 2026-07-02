@@ -8,7 +8,7 @@ import XdirUploadDialog from './components/XdirUploadDialog';
 import TrajectoryGenCenter from './components/TrajectoryGenCenter';
 import TrajectoryGenLeft from './components/TrajectoryGenLeft';
 import TrajectoryGenRight from './components/TrajectoryGenRight';
-import { generateTrajectoriesAsync, refineTrajectoriesAsync, buildTrajectoryMoeMapAsync, syncGroupMoeInMap, trajIdsNeedingMoeRecompute, pickOptimalTrajectoryPath, optimalPickWeightsFromParams, type TrajGenProgress, type MoeRecalcProgress, type TrajectoryMoe, type MoeSettings } from './simulation';
+import { generateTrajectoriesAsync, refineTrajectoriesAsync, buildTrajectoryMoeMapAsync, syncGroupMoeInMap, trajIdsNeedingMoeRecompute, pickOptimalTrajectoryPaths, optimalPickWeightsFromParams, type TrajGenProgress, type MoeRecalcProgress, type TrajectoryMoe, type MoeSettings } from './simulation';
 import { buildTrajectorySegments, resolveActiveSegment, getLaunchParams, createSkippedPoint, applyLoadedConfigurationToVideo, type LoadedConfiguration } from './utils/trajectorySegments';
 import { isUnsuccessfulTrajectory } from './utils/trajGenStatus';
 import type { ImportedProjectEntry } from './utils/projectIO';
@@ -27,6 +27,54 @@ const RIGHT_DEFAULT = 310;
 const MAX_TRAJECTORY_HISTORY = 10;
 
 type Tab = 'trajgen' | 'sysid';
+type OptimalArc = 'low' | 'high';
+
+type OptimalPathIds = {
+  lowArcIds: Set<string>;
+  highArcIds: Set<string>;
+  allIds: Set<string>;
+};
+
+function effectiveOptimalIdsFromGroups(
+  groups: TrajGroup[],
+  computed: OptimalPathIds,
+): OptimalPathIds {
+  const lowArcIds = new Set<string>();
+  const highArcIds = new Set<string>();
+  for (const group of groups) {
+    const lowIndex = group.optimalLowArcTrajectoryIndex;
+    if (lowIndex !== undefined && group.trajectories[lowIndex]) {
+      lowArcIds.add(group.trajectories[lowIndex].id);
+    } else {
+      const computedLow = group.trajectories.find((traj) => computed.lowArcIds.has(traj.id));
+      if (computedLow) lowArcIds.add(computedLow.id);
+    }
+    const highIndex = group.optimalHighArcTrajectoryIndex;
+    if (highIndex !== undefined && group.trajectories[highIndex]) {
+      highArcIds.add(group.trajectories[highIndex].id);
+    } else {
+      const computedHigh = group.trajectories.find((traj) => computed.highArcIds.has(traj.id));
+      if (computedHigh) highArcIds.add(computedHigh.id);
+    }
+  }
+  return { lowArcIds, highArcIds, allIds: new Set([...lowArcIds, ...highArcIds]) };
+}
+
+function groupsWithOptimalIds(
+  groups: TrajGroup[],
+  lowArcIds: Set<string>,
+  highArcIds: Set<string>,
+): TrajGroup[] {
+  return groups.map((group) => {
+    const lowIndex = group.trajectories.findIndex((traj) => lowArcIds.has(traj.id));
+    const highIndex = group.trajectories.findIndex((traj) => highArcIds.has(traj.id));
+    return {
+      ...group,
+      optimalLowArcTrajectoryIndex: lowIndex >= 0 ? lowIndex : undefined,
+      optimalHighArcTrajectoryIndex: highIndex >= 0 ? highIndex : undefined,
+    };
+  });
+}
 
 function makeDefaultVideo(id: string, name: string, url: string): VideoData {
   const meterstick = { x: 80, y: 680, length: 160 };
@@ -78,6 +126,10 @@ const DEFAULT_TRAJGEN_PARAMS: TrajGenParams = {
   optimalAngleDerivWeight: 0.03,
   optimalSpeedSecondDerivWeight: 0.01,
   optimalAngleSecondDerivWeight: 0.01,
+  optimalVelocityBufferLineX1: 1,
+  optimalVelocityBufferLineY1: 0,
+  optimalVelocityBufferLineX2: 5,
+  optimalVelocityBufferLineY2: 0,
 };
 
 function ResizeHandle({ onMouseDown }: { onMouseDown: (e: React.MouseEvent) => void }) {
@@ -221,7 +273,8 @@ export default function App() {
     setTrajGenParams((p) => ({ ...p, errorTolerance, goalPlaneAngleDeg }));
     const cleaned = trajGroupsRef.current.map((g) => ({
       ...g,
-      optimalTrajectoryIndex: undefined,
+      optimalLowArcTrajectoryIndex: undefined,
+      optimalHighArcTrajectoryIndex: undefined,
       trajectories: g.trajectories.map(
         ({ speedMoe, angleMoe, speedMoeMinus, speedMoePlus, angleMoeMinus, angleMoePlus, ...t }) => t,
       ),
@@ -284,14 +337,38 @@ export default function App() {
   const selectedVideo = videos.find((v) => v.id === selectedId) ?? null;
   const selectedGroup = trajGroups.find(g => g.id === selectedGroupId) ?? trajGroups[0] ?? null;
 
-  const bestMoeTrajIds = useMemo(() => {
-    if (trajGroups.length === 0 || trajMoeById.size === 0) return new Set<string>();
-    return pickOptimalTrajectoryPath(
+  const optimalTrajPaths = useMemo(() => {
+    if (trajGroups.length === 0 || trajMoeById.size === 0) {
+      return { lowArcIds: new Set<string>(), highArcIds: new Set<string>(), allIds: new Set<string>() };
+    }
+    return pickOptimalTrajectoryPaths(
       trajGroups,
       trajMoeById,
       optimalPickWeightsFromParams(trajGenParams),
     );
-  }, [trajGroups, trajMoeById, trajGenParams.optimalMoeWeight, trajGenParams.optimalSpeedDerivWeight, trajGenParams.optimalAngleDerivWeight, trajGenParams.optimalSpeedSecondDerivWeight, trajGenParams.optimalAngleSecondDerivWeight]);
+  }, [trajGroups, trajMoeById, trajGenParams.optimalMoeWeight, trajGenParams.optimalSpeedDerivWeight, trajGenParams.optimalAngleDerivWeight, trajGenParams.optimalSpeedSecondDerivWeight, trajGenParams.optimalAngleSecondDerivWeight, trajGenParams.optimalVelocityBufferLineX1, trajGenParams.optimalVelocityBufferLineY1, trajGenParams.optimalVelocityBufferLineX2, trajGenParams.optimalVelocityBufferLineY2]);
+  const visibleOptimalTrajPaths = useMemo(
+    () => effectiveOptimalIdsFromGroups(trajGroups, optimalTrajPaths),
+    [trajGroups, optimalTrajPaths],
+  );
+  const bestMoeTrajIds = visibleOptimalTrajPaths.allIds;
+
+  const handleSaveOptimalTrajectories = useCallback(() => {
+    setTrajGroups((prev) => groupsWithOptimalIds(prev, optimalTrajPaths.lowArcIds, optimalTrajPaths.highArcIds));
+  }, [optimalTrajPaths.lowArcIds, optimalTrajPaths.highArcIds]);
+
+  const handleSetManualOptimalTrajectory = useCallback((groupId: string, trajId: string, arc: OptimalArc) => {
+    setTrajGroups((prev) =>
+      prev.map((group) => {
+        if (group.id !== groupId) return group;
+        const index = group.trajectories.findIndex((traj) => traj.id === trajId);
+        if (index < 0) return group;
+        return arc === 'low'
+          ? { ...group, optimalLowArcTrajectoryIndex: index }
+          : { ...group, optimalHighArcTrajectoryIndex: index };
+      })
+    );
+  }, []);
 
   currentFrameRef.current = selectedVideo?.currentFrame ?? 0;
   totalFramesRef.current = totalFrames;
@@ -707,7 +784,7 @@ export default function App() {
           for (const t of g.trajectories) {
             if (isUnsuccessfulTrajectory(t)) removedIds.push(t.id);
           }
-          return { ...g, trajectories: kept };
+          return { ...g, optimalLowArcTrajectoryIndex: undefined, optimalHighArcTrajectoryIndex: undefined, trajectories: kept };
         })
         .filter((g) => g.trajectories.length > 0);
 
@@ -728,7 +805,7 @@ export default function App() {
       if (g.id !== groupId) return g;
       const next = g.trajectories.filter(t => t.id !== trajId);
       if (hoveredTrajId === trajId) setHoveredTrajId(null);
-      return { ...g, trajectories: next };
+      return { ...g, optimalLowArcTrajectoryIndex: undefined, optimalHighArcTrajectoryIndex: undefined, trajectories: next };
     }));
     removeTrajMoeIds([trajId]);
   }
@@ -1030,8 +1107,12 @@ export default function App() {
               onShowOptimalTrajectoriesChange={handleShowOptimalTrajectoriesTrajGenChange}
               trajMoeById={trajMoeById}
               bestMoeTrajIds={bestMoeTrajIds}
+              optimalLowArcTrajIds={visibleOptimalTrajPaths.lowArcIds}
+              optimalHighArcTrajIds={visibleOptimalTrajPaths.highArcIds}
               onHoverTraj={setHoveredTrajId}
               onParamsChange={setTrajGenParams}
+              onSaveOptimalTrajectories={handleSaveOptimalTrajectories}
+              onSetManualOptimalTrajectory={handleSetManualOptimalTrajectory}
             />
 
             {/* Right edge */}

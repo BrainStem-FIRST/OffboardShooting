@@ -19,13 +19,17 @@ interface Props {
   onShowOptimalTrajectoriesChange: (show: boolean) => void;
   trajMoeById: Map<string, TrajectoryMoe>;
   bestMoeTrajIds: Set<string>;
+  optimalLowArcTrajIds: Set<string>;
+  optimalHighArcTrajIds: Set<string>;
   onHoverTraj: (id: string | null) => void;
   onParamsChange: (params: TrajGenParams) => void;
+  onSaveOptimalTrajectories: () => void;
+  onSetManualOptimalTrajectory: (groupId: string, trajId: string, arc: 'low' | 'high') => void;
 }
 
 const TABS: { id: CenterTab; label: string }[] = [
   { id: 'visualizer', label: 'Trajectory Visualizer' },
-  { id: 'optimalAnalysis', label: 'Optimal Analysis' },
+  { id: 'optimalAnalysis', label: 'Optimal Trajectories' },
 ];
 
 export default function TrajectoryGenCenter({
@@ -39,8 +43,12 @@ export default function TrajectoryGenCenter({
   onShowOptimalTrajectoriesChange,
   trajMoeById,
   bestMoeTrajIds,
+  optimalLowArcTrajIds,
+  optimalHighArcTrajIds,
   onHoverTraj,
   onParamsChange,
+  onSaveOptimalTrajectories,
+  onSetManualOptimalTrajectory,
 }: Props) {
   const [centerTab, setCenterTab] = useState<CenterTab>('visualizer');
 
@@ -88,7 +96,10 @@ export default function TrajectoryGenCenter({
                 showOptimalTrajectories={showOptimalTrajectories}
                 trajMoeById={trajMoeById}
                 bestMoeTrajIds={bestMoeTrajIds}
+                optimalLowArcTrajIds={optimalLowArcTrajIds}
+                optimalHighArcTrajIds={optimalHighArcTrajIds}
                 onHoverTraj={onHoverTraj}
+                onSetManualOptimalTrajectory={onSetManualOptimalTrajectory}
               />
             </div>
           </>
@@ -99,8 +110,11 @@ export default function TrajectoryGenCenter({
               groups={groups}
               params={params}
               trajMoeById={trajMoeById}
-              bestMoeTrajIds={bestMoeTrajIds}
+              optimalLowArcTrajIds={optimalLowArcTrajIds}
+              optimalHighArcTrajIds={optimalHighArcTrajIds}
               onParamsChange={onParamsChange}
+              onSaveOptimalTrajectories={onSaveOptimalTrajectories}
+              onSetManualOptimalTrajectory={onSetManualOptimalTrajectory}
             />
           </div>
         )}

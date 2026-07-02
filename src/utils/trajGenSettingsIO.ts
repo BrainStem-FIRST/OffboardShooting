@@ -29,6 +29,10 @@ const PARAM_KEYS: (keyof TrajGenParams)[] = [
   'optimalAngleDerivWeight',
   'optimalSpeedSecondDerivWeight',
   'optimalAngleSecondDerivWeight',
+  'optimalVelocityBufferLineX1',
+  'optimalVelocityBufferLineY1',
+  'optimalVelocityBufferLineX2',
+  'optimalVelocityBufferLineY2',
 ];
 
 function isTrajGenParams(value: unknown): value is TrajGenParams {
@@ -47,7 +51,7 @@ function isTrajGenParams(value: unknown): value is TrajGenParams {
 }
 
 function normalizeTrajGenParams(record: Record<string, unknown>): TrajGenParams {
-  const params = record as TrajGenParams;
+  const params = record as unknown as TrajGenParams;
   return {
     ...params,
     goalPlaneAngleDeg: typeof params.goalPlaneAngleDeg === 'number' ? params.goalPlaneAngleDeg : 0,
@@ -58,13 +62,17 @@ function normalizeTrajGenParams(record: Record<string, unknown>): TrajGenParams 
     ...(typeof params.optimalAngleDerivWeight === 'number' ? { optimalAngleDerivWeight: params.optimalAngleDerivWeight } : {}),
     ...(typeof params.optimalSpeedSecondDerivWeight === 'number' ? { optimalSpeedSecondDerivWeight: params.optimalSpeedSecondDerivWeight } : {}),
     ...(typeof params.optimalAngleSecondDerivWeight === 'number' ? { optimalAngleSecondDerivWeight: params.optimalAngleSecondDerivWeight } : {}),
+    ...(typeof params.optimalVelocityBufferLineX1 === 'number' ? { optimalVelocityBufferLineX1: params.optimalVelocityBufferLineX1 } : {}),
+    ...(typeof params.optimalVelocityBufferLineY1 === 'number' ? { optimalVelocityBufferLineY1: params.optimalVelocityBufferLineY1 } : {}),
+    ...(typeof params.optimalVelocityBufferLineX2 === 'number' ? { optimalVelocityBufferLineX2: params.optimalVelocityBufferLineX2 } : {}),
+    ...(typeof params.optimalVelocityBufferLineY2 === 'number' ? { optimalVelocityBufferLineY2: params.optimalVelocityBufferLineY2 } : {}),
   };
 }
 
 export function normalizeTrajGenParamsValue(value: unknown): TrajGenParams | null {
   if (!value || typeof value !== 'object') return null;
   if (isTrajGenParams(value)) {
-    return normalizeTrajGenParams(value as Record<string, unknown>);
+    return normalizeTrajGenParams(value as unknown as Record<string, unknown>);
   }
   return null;
 }

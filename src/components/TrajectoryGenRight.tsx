@@ -229,7 +229,6 @@ export default function TrajectoryGenRight({
   useEffect(() => { magnusRef.current = magnus; }, [magnus]);
 
   function applyRefineResult(
-    traj: GeneratedTrajectory,
     result: ReturnType<typeof refineTrajectory>,
     dx: number,
     dy: number,
@@ -270,7 +269,7 @@ export default function TrajectoryGenRight({
         const p = paramsRef.current;
         const gParams = { ...p, dx: g.dx, dy: g.dy };
         const result = refineTrajectory(traj, gParams, dragRef.current, magnusRef.current, REFINE_MAX_ITER, REFINE_THRESHOLD_M, 'angle');
-        const refined = applyRefineResult(traj, result, g.dx, g.dy);
+        const refined = applyRefineResult(result, g.dx, g.dy);
         onUpdateGroup(g.id, trajectoriesRef.current.map(tr => tr.id === id ? refined : tr));
       }
     }
@@ -346,7 +345,7 @@ export default function TrajectoryGenRight({
     if (!traj) return;
     const gParams = { ...params, dx: group.dx, dy: group.dy };
     const result = refineTrajectory(traj, gParams, drag, magnus, REFINE_MAX_ITER, REFINE_THRESHOLD_M, 'angle');
-    const refined = applyRefineResult(traj, result, group.dx, group.dy);
+    const refined = applyRefineResult(result, group.dx, group.dy);
     onUpdateGroup(group.id, trajectories.map(tr => tr.id === id ? refined : tr));
   }
 
@@ -480,7 +479,7 @@ export default function TrajectoryGenRight({
           projectFileHandleRef.current = handle;
         }
 
-        const result = await saveTrajGenProjectToHandle(handle, groups, params, trajMoeById);
+        const result = await saveTrajGenProjectToHandle(handle, params, groups, trajMoeById);
         if (!result.ok) {
           setImportStatus({ ok: false, text: result.message });
           return;

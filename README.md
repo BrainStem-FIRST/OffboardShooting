@@ -1,6 +1,6 @@
-# ProjectileTrajectorySimulator
+# BrainSTEM Offboard Shooting
 link here:
-https://justin16chen.github.io/ProjectileTrajectorySimulator/
+https://brainstem-first.github.io/OffboardShooting/
 
 ## Overview
 This is a website to create your own physics-based launcher capable of 
@@ -23,7 +23,7 @@ The physics inside this website models 3 forces: gravity, drag, and magnus (spin
    - Some of these videos will go to tuning the 3 values, some will go to validate the 3 values to make sure they are accurate
    - Make sure camera is static throughout the duration of the video. If not, it will be impossible to tune you drag and magnus coefficients
 ### Tuning shooter speed -> exit speed conversion
-2. Upload the videos into the ProjectileTrajectorySimulator website
+2. Upload the videos into the OffboardShooting website
 3. Go through the videos frame-by-frame and plot the positions of the balls
 4. Drag the virtual yellow meterstick and match it with the meterstick in the video
 5. Go to System Identification -> Empirical Testing. Specify the FPS of your video there

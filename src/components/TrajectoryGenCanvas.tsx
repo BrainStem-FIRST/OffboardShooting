@@ -11,7 +11,10 @@ interface Props {
   showOptimalTrajectories: boolean;
   trajMoeById: Map<string, TrajectoryMoe>;
   bestMoeTrajIds: Set<string>;
+  optimalLowArcTrajIds: Set<string>;
+  optimalHighArcTrajIds: Set<string>;
   onHoverTraj: (id: string | null) => void;
+  onSetManualOptimalTrajectory: (groupId: string, trajId: string, arc: 'low' | 'high') => void;
 }
 
 interface View {
@@ -22,10 +25,12 @@ interface View {
 
 interface HitPolyline {
   id: string;
+  groupId: string;
   points: [number, number][];
   traj: GeneratedTrajectory;
   dx: number;
   dy: number;
+  velocityBuffer: number;
 }
 
 interface CanvasTooltip {
@@ -34,6 +39,7 @@ interface CanvasTooltip {
   dx: number;
   dy: number;
   exitVelocity: number;
+  velocityBuffer: number;
   exitAngle: number;
   timeOfFlight: number;
   speedMoeMinus: number | null;
@@ -47,6 +53,18 @@ const HIT_THRESHOLD_PX = 8;
 const TRAJ_COLOR = 'rgba(59,130,246,0.3)';
 const TRAJ_HOVER_COLOR = '#93c5fd';
 const TRAJ_MAX_MOE_COLOR = 'rgba(52, 211, 153, 0.85)';
+const TRAJ_LOWEST_SPEED_COLOR = '#ffffff';
+
+type OptimalArc = 'low' | 'high';
+
+interface OptimalContextDialog {
+  x: number;
+  y: number;
+  groupId: string;
+  trajId: string;
+  arc: OptimalArc;
+  alreadyArc: OptimalArc | null;
+}
 
 function distToSegment(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
   const dx = x2 - x1;
@@ -76,7 +94,7 @@ function hitTestPolylines(polylines: HitPolyline[], mx: number, my: number): Hit
 
 export default function TrajectoryGenCanvas({
   params, groups, selectedGroupId, hoveredId, showAll, showOptimalTrajectories,
-  trajMoeById, bestMoeTrajIds, onHoverTraj,
+  trajMoeById, bestMoeTrajIds, optimalLowArcTrajIds, optimalHighArcTrajIds, onHoverTraj, onSetManualOptimalTrajectory,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -84,6 +102,7 @@ export default function TrajectoryGenCanvas({
   const draggingRef = useRef<{ lastX: number; lastY: number } | null>(null);
   const hitPolylinesRef = useRef<HitPolyline[]>([]);
   const [tooltip, setTooltip] = useState<CanvasTooltip | null>(null);
+  const [optimalDialog, setOptimalDialog] = useState<OptimalContextDialog | null>(null);
 
   function worldToCanvas(wx: number, wy: number, view: View, cssH: number): [number, number] {
     const sx = (wx - view.panX) * view.zoom;
@@ -242,16 +261,18 @@ export default function TrajectoryGenCanvas({
 
     const activeMagnusPower = resolveMagnusPower(params.magnusPower);
 
-    type TrajDrawEntry = { traj: GeneratedTrajectory; drag: number; magnus: number; dx: number; dy: number };
+    type TrajDrawEntry = { traj: GeneratedTrajectory; groupId: string; drag: number; magnus: number; dx: number; dy: number };
     const trajEntries: TrajDrawEntry[] = showOptimalTrajectories
       ? groups.flatMap((g) => {
-          const best = g.trajectories.find((t) => bestMoeTrajIds.has(t.id));
-          return best ? [{ traj: best, drag: g.drag, magnus: g.magnus, dx: g.dx, dy: g.dy }] : [];
+          return g.trajectories
+            .filter((t) => bestMoeTrajIds.has(t.id))
+            .map((traj) => ({ traj, groupId: g.id, drag: g.drag, magnus: g.magnus, dx: g.dx, dy: g.dy }));
         })
       : showAll
-      ? groups.flatMap((g) => g.trajectories.map((traj) => ({ traj, drag: g.drag, magnus: g.magnus, dx: g.dx, dy: g.dy })))
+      ? groups.flatMap((g) => g.trajectories.map((traj) => ({ traj, groupId: g.id, drag: g.drag, magnus: g.magnus, dx: g.dx, dy: g.dy })))
       : (selectedGroup?.trajectories ?? []).map((traj) => ({
           traj,
+          groupId: selectedGroup!.id,
           drag: selectedGroup!.drag,
           magnus: selectedGroup!.magnus,
           dx: selectedGroup!.dx,
@@ -259,9 +280,29 @@ export default function TrajectoryGenCanvas({
         }));
 
     const polylines: HitPolyline[] = [];
+    const lowestSpeedTrajIds = new Set<string>();
+    const visibleGroups = showOptimalTrajectories || showAll
+      ? groups
+      : selectedGroup
+      ? [selectedGroup]
+      : [];
+    for (const g of visibleGroups) {
+      let lowest: GeneratedTrajectory | null = null;
+      for (const traj of g.trajectories) {
+        if (
+          lowest === null ||
+          traj.exitVelocity < lowest.exitVelocity - 1e-12 ||
+          (Math.abs(traj.exitVelocity - lowest.exitVelocity) <= 1e-12 && traj.exitAngle < lowest.exitAngle)
+        ) {
+          lowest = traj;
+        }
+      }
+      if (lowest) lowestSpeedTrajIds.add(lowest.id);
+    }
 
     function drawTraj(
       traj: GeneratedTrajectory,
+      groupId: string,
       drag: number,
       magnus: number,
       dx: number,
@@ -284,24 +325,34 @@ export default function TrajectoryGenCanvas({
       ctx.lineWidth = lineWidth;
       ctx.stroke();
       if (screenPts.length >= 2) {
-        polylines.push({ id: traj.id, points: screenPts, traj, dx, dy });
+        const group = groups.find((g) => Math.abs(g.dx - dx) < 1e-9 && Math.abs(g.dy - dy) < 1e-9);
+        const minSpeed = group?.trajectories.length
+          ? Math.min(...group.trajectories.map((t) => t.exitVelocity))
+          : traj.exitVelocity;
+        polylines.push({ id: traj.id, groupId, points: screenPts, traj, dx, dy, velocityBuffer: traj.exitVelocity - minSpeed });
       }
     }
 
-    for (const { traj, drag, magnus, dx, dy } of trajEntries) {
-      if (traj.id === hoveredId || bestMoeTrajIds.has(traj.id)) continue;
-      drawTraj(traj, drag, magnus, dx, dy, TRAJ_COLOR, 1);
+    for (const { traj, groupId, drag, magnus, dx, dy } of trajEntries) {
+      if (traj.id === hoveredId || bestMoeTrajIds.has(traj.id) || lowestSpeedTrajIds.has(traj.id)) continue;
+      drawTraj(traj, groupId, drag, magnus, dx, dy, TRAJ_COLOR, 1);
     }
 
-    for (const { traj, drag, magnus, dx, dy } of trajEntries) {
-      if (bestMoeTrajIds.has(traj.id) && traj.id !== hoveredId) {
-        drawTraj(traj, drag, magnus, dx, dy, TRAJ_MAX_MOE_COLOR, 2);
+    for (const { traj, groupId, drag, magnus, dx, dy } of trajEntries) {
+      if (bestMoeTrajIds.has(traj.id) && traj.id !== hoveredId && !lowestSpeedTrajIds.has(traj.id)) {
+        drawTraj(traj, groupId, drag, magnus, dx, dy, TRAJ_MAX_MOE_COLOR, 2);
+      }
+    }
+
+    for (const { traj, groupId, drag, magnus, dx, dy } of trajEntries) {
+      if (lowestSpeedTrajIds.has(traj.id) && traj.id !== hoveredId) {
+        drawTraj(traj, groupId, drag, magnus, dx, dy, TRAJ_LOWEST_SPEED_COLOR, 2.5);
       }
     }
 
     if (hoveredId) {
       const hovered = trajEntries.find((e) => e.traj.id === hoveredId);
-      if (hovered) drawTraj(hovered.traj, hovered.drag, hovered.magnus, hovered.dx, hovered.dy, TRAJ_HOVER_COLOR, 2);
+      if (hovered) drawTraj(hovered.traj, hovered.groupId, hovered.drag, hovered.magnus, hovered.dx, hovered.dy, TRAJ_HOVER_COLOR, 2);
     }
 
     hitPolylinesRef.current = polylines;
@@ -353,6 +404,7 @@ export default function TrajectoryGenCanvas({
         dx: hit.dx,
         dy: hit.dy,
         exitVelocity: hit.traj.exitVelocity,
+        velocityBuffer: hit.velocityBuffer,
         exitAngle: hit.traj.exitAngle,
         timeOfFlight: hit.traj.timeOfFlight,
         speedMoeMinus: moe?.speedMoeMinus ?? null,
@@ -430,6 +482,46 @@ export default function TrajectoryGenCanvas({
     onHoverTraj(null);
   }, [clearCanvasHover, onHoverTraj]);
 
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const hit = hitTestPolylines(hitPolylinesRef.current, e.clientX - rect.left, e.clientY - rect.top);
+    if (!hit) {
+      setOptimalDialog(null);
+      return;
+    }
+    const alreadyArc = optimalLowArcTrajIds.has(hit.id)
+      ? 'low'
+      : optimalHighArcTrajIds.has(hit.id)
+      ? 'high'
+      : null;
+    const group = groups.find((g) => g.id === hit.groupId);
+    let arc: OptimalArc = 'low';
+    if (group?.trajectories.length) {
+      let lowest = group.trajectories[0];
+      for (const traj of group.trajectories) {
+        if (
+          traj.exitVelocity < lowest.exitVelocity - 1e-12 ||
+          (Math.abs(traj.exitVelocity - lowest.exitVelocity) <= 1e-12 && traj.exitAngle < lowest.exitAngle)
+        ) {
+          lowest = traj;
+        }
+      }
+      arc = hit.traj.exitAngle > lowest.exitAngle ? 'high' : 'low';
+    }
+    setTooltip(null);
+    setOptimalDialog({
+      x: e.clientX,
+      y: e.clientY,
+      groupId: hit.groupId,
+      trajId: hit.id,
+      arc: alreadyArc ?? arc,
+      alreadyArc,
+    });
+  }, [groups, optimalLowArcTrajIds, optimalHighArcTrajIds]);
+
   return (
     <div ref={containerRef} className="relative w-full h-full">
       <canvas
@@ -440,7 +532,60 @@ export default function TrajectoryGenCanvas({
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseLeave}
+        onContextMenu={handleContextMenu}
       />
+      {optimalDialog && (
+        <div
+          data-context-menu
+          className="fixed z-50 min-w-[14rem] rounded-md border border-gray-600 bg-gray-900 p-3 text-sm text-gray-200 shadow-xl"
+          style={{ left: optimalDialog.x, top: optimalDialog.y }}
+        >
+          <div className="mb-2 font-medium text-gray-100">
+            {optimalDialog.alreadyArc
+              ? 'Make optimal'
+              : `Make optimal ${optimalDialog.arc === 'low' ? 'low arc' : 'high arc'}`}
+          </div>
+          {optimalDialog.alreadyArc ? (
+            <>
+              <div className="mb-3 text-xs text-gray-400">
+                Trajectory is already {optimalDialog.alreadyArc === 'low' ? 'low arc' : 'high arc'} optimal.
+                Cannot change.
+              </div>
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  className="h-7 px-3 rounded bg-gray-800 text-xs text-gray-200 hover:bg-gray-700"
+                  onClick={() => setOptimalDialog(null)}
+                >
+                  Close
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  className="h-7 px-3 rounded bg-gray-800 text-xs text-gray-300 hover:bg-gray-700"
+                  onClick={() => setOptimalDialog(null)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="h-7 px-3 rounded bg-blue-700 text-xs text-white hover:bg-blue-600"
+                  onClick={() => {
+                    onSetManualOptimalTrajectory(optimalDialog.groupId, optimalDialog.trajId, optimalDialog.arc);
+                    setOptimalDialog(null);
+                  }}
+                >
+                  Done
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
       {tooltip && (
         <div
           className="absolute z-10 pointer-events-none px-2.5 py-1.5 rounded bg-gray-900 border border-gray-600 text-xs shadow-lg tabular-nums space-y-0.5"
@@ -456,6 +601,9 @@ export default function TrajectoryGenCanvas({
                 {' '}{formatSpeedMoeBounds({ speedMoeMinus: tooltip.speedMoeMinus, speedMoePlus: tooltip.speedMoePlus })}
               </span>
             )}
+          </div>
+          <div className="text-gray-300">
+            Vel buffer <span className="text-white font-mono">{tooltip.velocityBuffer.toFixed(3)} m/s</span>
           </div>
           <div className="text-gray-300">
             Exit angle <span className="text-white font-mono">{tooltip.exitAngle.toFixed(2)}°</span>

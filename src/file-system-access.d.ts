@@ -15,6 +15,8 @@ declare global {
   interface FileSystemFileHandle extends FileSystemHandle {
     getFile(): Promise<File>;
     createWritable(options?: { keepExistingData?: boolean }): Promise<FileSystemWritableFileStream>;
+    queryPermission(descriptor?: FileSystemHandlePermissionDescriptor): Promise<PermissionState>;
+    requestPermission(descriptor?: FileSystemHandlePermissionDescriptor): Promise<PermissionState>;
   }
 
   interface FileSystemDirectoryHandle extends FileSystemHandle {

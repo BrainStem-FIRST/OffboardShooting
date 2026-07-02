@@ -89,8 +89,10 @@ export interface TrajGroup {
   /** Magnus speed exponent used when this group was generated. */
   magnusPower?: number;
   trajectories: GeneratedTrajectory[];
-  /** Index into trajectories for the optimal shot (from JSON import/export). */
-  optimalTrajectoryIndex?: number;
+  /** Index into trajectories for the optimal low-arc shot (from JSON import/export). */
+  optimalLowArcTrajectoryIndex?: number;
+  /** Index into trajectories for the optimal high-arc shot (from JSON import/export). */
+  optimalHighArcTrajectoryIndex?: number;
 }
 
 export interface TrajGenParams {
@@ -127,6 +129,12 @@ export interface TrajGenParams {
   optimalSpeedSecondDerivWeight: number;
   /** Penalty weight on |d²(exit angle)/dx²| at interior goal distances. */
   optimalAngleSecondDerivWeight: number;
+  /** First point controlling the minimum velocity-buffer line. */
+  optimalVelocityBufferLineX1: number;
+  optimalVelocityBufferLineY1: number;
+  /** Second point controlling the minimum velocity-buffer line. */
+  optimalVelocityBufferLineX2: number;
+  optimalVelocityBufferLineY2: number;
 }
 
 /** Weights used by global optimal trajectory path selection (saved in trajectory JSON). */
@@ -137,6 +145,10 @@ export type TrajOptimizerParams = Pick<
   | 'optimalAngleDerivWeight'
   | 'optimalSpeedSecondDerivWeight'
   | 'optimalAngleSecondDerivWeight'
+  | 'optimalVelocityBufferLineX1'
+  | 'optimalVelocityBufferLineY1'
+  | 'optimalVelocityBufferLineX2'
+  | 'optimalVelocityBufferLineY2'
 >;
 
 export const DEFAULT_TRAJ_OPTIMIZER_PARAMS: TrajOptimizerParams = {
@@ -145,4 +157,8 @@ export const DEFAULT_TRAJ_OPTIMIZER_PARAMS: TrajOptimizerParams = {
   optimalAngleDerivWeight: 0.03,
   optimalSpeedSecondDerivWeight: 0.01,
   optimalAngleSecondDerivWeight: 0.01,
+  optimalVelocityBufferLineX1: 1,
+  optimalVelocityBufferLineY1: 0,
+  optimalVelocityBufferLineX2: 5,
+  optimalVelocityBufferLineY2: 0,
 };

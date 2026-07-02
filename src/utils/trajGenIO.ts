@@ -4,7 +4,7 @@ import {
   groupExportFileName,
   groupExportPayload,
   resolveMagnusPower,
-  pickOptimalTrajectoryPath,
+  pickOptimalTrajectoryPaths,
   optimalPickWeightsFromParams,
   trajOptimizerParamsFromGenParams,
   type TrajectoryMoe,
@@ -13,8 +13,10 @@ import { pickFolderForImport } from './projectIO';
 
 const TRAJ_GROUP_FILE_RE = /^\([\d.eE+-]+,\s*[\d.eE+-]+\)\.json$/;
 
-/** JSON key for the optimal trajectory index in group export files. */
-export const OPTIMAL_TRAJECTORY_INDEX_KEY = 'optimalTrajectoryIndex';
+/** JSON keys for optimal trajectory indices in group export files. */
+export const OPTIMAL_LOW_ARC_TRAJECTORY_INDEX_KEY = 'optimalLowArcTrajectoryIndex';
+export const OPTIMAL_HIGH_ARC_TRAJECTORY_INDEX_KEY = 'optimalHighArcTrajectoryIndex';
+const LEGACY_OPTIMAL_TRAJECTORY_INDEX_KEY = 'optimalTrajectoryIndex';
 
 export const OPTIMIZER_PARAMS_FILE_NAME = 'optimizer_params.json';
 
@@ -24,11 +26,21 @@ const OPTIMIZER_PARAM_KEYS = [
   'optimalAngleDerivWeight',
   'optimalSpeedSecondDerivWeight',
   'optimalAngleSecondDerivWeight',
+  'optimalVelocityBufferLineX1',
+  'optimalVelocityBufferLineY1',
+  'optimalVelocityBufferLineX2',
+  'optimalVelocityBufferLineY2',
 ] as const satisfies readonly (keyof TrajOptimizerParams)[];
 
-function readOptimalTrajectoryIndex(record: Record<string, unknown>): number | undefined {
-  const primary = record[OPTIMAL_TRAJECTORY_INDEX_KEY];
+function readIntegerIndex(record: Record<string, unknown>, key: string): number | undefined {
+  const primary = record[key];
   if (typeof primary === 'number' && Number.isInteger(primary)) return primary;
+  return undefined;
+}
+
+function readLegacyOptimalTrajectoryIndex(record: Record<string, unknown>): number | undefined {
+  const primary = readIntegerIndex(record, LEGACY_OPTIMAL_TRAJECTORY_INDEX_KEY);
+  if (primary !== undefined) return primary;
   const legacy = record.biggestMOETrajectory;
   if (typeof legacy === 'number' && Number.isInteger(legacy)) return legacy;
   return undefined;
@@ -82,7 +94,11 @@ export function parseTrajGroupJson(json: unknown, batchId = Date.now()): TrajGro
   }
   if (!Array.isArray(record.trajectories)) return null;
 
-  const optimalTrajectoryIndex = readOptimalTrajectoryIndex(record);
+  const legacyOptimalTrajectoryIndex = readLegacyOptimalTrajectoryIndex(record);
+  const optimalLowArcTrajectoryIndex =
+    readIntegerIndex(record, OPTIMAL_LOW_ARC_TRAJECTORY_INDEX_KEY) ?? legacyOptimalTrajectoryIndex;
+  const optimalHighArcTrajectoryIndex =
+    readIntegerIndex(record, OPTIMAL_HIGH_ARC_TRAJECTORY_INDEX_KEY) ?? legacyOptimalTrajectoryIndex;
 
   const trajs: GeneratedTrajectory[] = (record.trajectories as Record<string, number>[]).map((t, i) => ({
     id: `import-${batchId}-${i}-${Math.random().toString(36).slice(2)}`,
@@ -106,10 +122,15 @@ export function parseTrajGroupJson(json: unknown, batchId = Date.now()): TrajGro
     drag: importedDrag,
     magnus: importedMagnus,
     trajectories: trajs,
-    ...(optimalTrajectoryIndex !== undefined &&
-    optimalTrajectoryIndex >= 0 &&
-    optimalTrajectoryIndex < trajs.length
-      ? { optimalTrajectoryIndex }
+    ...(optimalLowArcTrajectoryIndex !== undefined &&
+    optimalLowArcTrajectoryIndex >= 0 &&
+    optimalLowArcTrajectoryIndex < trajs.length
+      ? { optimalLowArcTrajectoryIndex }
+      : {}),
+    ...(optimalHighArcTrajectoryIndex !== undefined &&
+    optimalHighArcTrajectoryIndex >= 0 &&
+    optimalHighArcTrajectoryIndex < trajs.length
+      ? { optimalHighArcTrajectoryIndex }
       : {}),
   };
 }
@@ -274,7 +295,7 @@ export async function loadTrajGroupsFromDirectory(
 export async function saveTrajGroupsToDirectory(
   writeDir: FileSystemDirectoryHandle,
   groups: TrajGroup[],
-  params: Pick<TrajGenParams, 'errorTolerance' | 'magnusPower' | 'goalPlaneAngleDeg' | 'optimalMoeWeight' | 'optimalSpeedDerivWeight' | 'optimalAngleDerivWeight' | 'optimalSpeedSecondDerivWeight' | 'optimalAngleSecondDerivWeight'>,
+  params: Pick<TrajGenParams, 'errorTolerance' | 'magnusPower' | 'goalPlaneAngleDeg' | 'optimalMoeWeight' | 'optimalSpeedDerivWeight' | 'optimalAngleDerivWeight' | 'optimalSpeedSecondDerivWeight' | 'optimalAngleSecondDerivWeight' | 'optimalVelocityBufferLineX1' | 'optimalVelocityBufferLineY1' | 'optimalVelocityBufferLineX2' | 'optimalVelocityBufferLineY2'>,
   onProgress?: (current: number, total: number) => void,
   trajMoeById?: Map<string, TrajectoryMoe>,
 ): Promise<SaveTrajFolderResult> {
@@ -287,10 +308,10 @@ export async function saveTrajGroupsToDirectory(
     return { ok: false, message: 'Write permission was denied for the imported trajectory folder.' };
   }
 
-  const optimalIds =
+  const optimalPaths =
     trajMoeById && trajMoeById.size > 0
-      ? pickOptimalTrajectoryPath(groupsWithTrajs, trajMoeById, optimalPickWeightsFromParams(params as TrajGenParams))
-      : new Set<string>();
+      ? pickOptimalTrajectoryPaths(groupsWithTrajs, trajMoeById, optimalPickWeightsFromParams(params as TrajGenParams))
+      : { lowArcIds: new Set<string>(), highArcIds: new Set<string>(), allIds: new Set<string>() };
 
   const optimizerParams = trajOptimizerParamsFromGenParams(params as TrajGenParams);
 
@@ -311,14 +332,20 @@ export async function saveTrajGroupsToDirectory(
     const group = groupsWithTrajs[i];
     onProgress?.(i + 1, groupsWithTrajs.length);
     const fileName = groupExportFileName(group);
-    const optimalIndex = group.trajectories.findIndex((t) => optimalIds.has(t.id));
+    const computedLowArcIndex = group.trajectories.findIndex((t) => optimalPaths.lowArcIds.has(t.id));
+    const computedHighArcIndex = group.trajectories.findIndex((t) => optimalPaths.highArcIds.has(t.id));
+    const optimalLowArcIndex =
+      group.optimalLowArcTrajectoryIndex !== undefined ? group.optimalLowArcTrajectoryIndex : computedLowArcIndex;
+    const optimalHighArcIndex =
+      group.optimalHighArcTrajectoryIndex !== undefined ? group.optimalHighArcTrajectoryIndex : computedHighArcIndex;
     const text = JSON.stringify(
       groupExportPayload(
         group,
         params.errorTolerance,
         resolveMagnusPower(params.magnusPower),
         params.goalPlaneAngleDeg,
-        optimalIndex >= 0 ? optimalIndex : undefined,
+        optimalLowArcIndex >= 0 ? optimalLowArcIndex : undefined,
+        optimalHighArcIndex >= 0 ? optimalHighArcIndex : undefined,
         optimizerParams,
       ),
       null,

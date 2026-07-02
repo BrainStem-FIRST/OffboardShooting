@@ -1072,10 +1072,6 @@ const MOE_MAX_ITER = 50;
 const MOE_SPEED_MAX_DELTA = 15; // m/s
 const MOE_ANGLE_MAX_DELTA = 45; // deg
 const MOE_SPEED_WALK_STEP = 0.1; // m/s
-/** Weight below-nominal (slower) velocity margin more when ranking speed MOE. */
-export const MOE_SPEED_BELOW_WEIGHT = 0.85;
-export const MOE_SPEED_ABOVE_WEIGHT = 0.15;
-
 /** Unit vectors for a goal plane tilted angleDeg from horizontal (along = along-plane, normal = ⊥). */
 export function goalPlaneBasis(angleDeg: number): {
   along: { x: number; y: number };
@@ -1256,8 +1252,8 @@ function walkAndRefineOneSidedMargin(
   return good;
 }
 
-function computeWeightedSpeedMoe(speedMoePlus: number, speedMoeMinus: number): number {
-  return speedMoeMinus * MOE_SPEED_BELOW_WEIGHT + speedMoePlus * MOE_SPEED_ABOVE_WEIGHT;
+function computeSpeedMoe(speedMoePlus: number, speedMoeMinus: number): number {
+  return Math.min(speedMoePlus, speedMoeMinus);
 }
 
 function computeCombinedMoe(speedMoe: number, angleMoe: number): number {
@@ -1284,7 +1280,7 @@ export function moeFromImportedFields(t: GeneratedTrajectory): TrajectoryMoe | n
     t.angleMoeMinus !== undefined &&
     t.angleMoePlus !== undefined
   ) {
-    const speedMoe = computeWeightedSpeedMoe(t.speedMoePlus, t.speedMoeMinus);
+    const speedMoe = computeSpeedMoe(t.speedMoePlus, t.speedMoeMinus);
     const angleMoe = Math.min(t.angleMoePlus, t.angleMoeMinus);
     return {
       speedMoe,
@@ -1342,6 +1338,10 @@ export interface OptimalPickWeights {
   angleDerivWeight: number;
   speedSecondDerivWeight: number;
   angleSecondDerivWeight: number;
+  velocityBufferLineX1: number;
+  velocityBufferLineY1: number;
+  velocityBufferLineX2: number;
+  velocityBufferLineY2: number;
   moeScale?: number;
   speedScale?: number;
   angleScale?: number;
@@ -1356,6 +1356,10 @@ export function optimalPickWeightsFromParams(params: TrajGenParams): OptimalPick
     angleDerivWeight: params.optimalAngleDerivWeight,
     speedSecondDerivWeight: params.optimalSpeedSecondDerivWeight,
     angleSecondDerivWeight: params.optimalAngleSecondDerivWeight,
+    velocityBufferLineX1: params.optimalVelocityBufferLineX1,
+    velocityBufferLineY1: params.optimalVelocityBufferLineY1,
+    velocityBufferLineX2: params.optimalVelocityBufferLineX2,
+    velocityBufferLineY2: params.optimalVelocityBufferLineY2,
     moeScale: MOE_NORM_SCALE,
     speedScale: 1,
     angleScale: 1,
@@ -1364,12 +1368,54 @@ export function optimalPickWeightsFromParams(params: TrajGenParams): OptimalPick
   };
 }
 
+export function velocityBufferThresholdAtDx(weights: OptimalPickWeights, dx: number): number {
+  const x1 = weights.velocityBufferLineX1;
+  const y1 = weights.velocityBufferLineY1;
+  const x2 = weights.velocityBufferLineX2;
+  const y2 = weights.velocityBufferLineY2;
+  if (!Number.isFinite(x1) || !Number.isFinite(y1) || !Number.isFinite(x2) || !Number.isFinite(y2)) {
+    return 0;
+  }
+  if (Math.abs(x2 - x1) < 1e-9) return Math.max(0, (y1 + y2) / 2);
+  return Math.max(0, y1 + ((dx - x1) / (x2 - x1)) * (y2 - y1));
+}
+
 export interface OptimalSequencePoint {
   dx: number;
   exitSpeed: number;
   exitAngle: number;
   trajId: string;
   groupId: string;
+  velocityBuffer: number;
+}
+
+export function velocityBufferForTrajectory(group: TrajGroup, traj: GeneratedTrajectory): number {
+  if (group.trajectories.length === 0) return 0;
+  const minSpeed = Math.min(...group.trajectories.map((t) => t.exitVelocity));
+  return traj.exitVelocity - minSpeed;
+}
+
+export type OptimalArc = 'low' | 'high';
+
+function boundaryAngleForLowestSpeed(group: TrajGroup): number {
+  let best: GeneratedTrajectory | null = null;
+  for (const traj of group.trajectories) {
+    if (
+      best === null ||
+      traj.exitVelocity < best.exitVelocity - 1e-12 ||
+      (Math.abs(traj.exitVelocity - best.exitVelocity) <= 1e-12 && traj.exitAngle < best.exitAngle)
+    ) {
+      best = traj;
+    }
+  }
+  return best?.exitAngle ?? 0;
+}
+
+function isTrajectoryInArc(group: TrajGroup, traj: GeneratedTrajectory, arc: OptimalArc): boolean {
+  const boundaryAngle = boundaryAngleForLowestSpeed(group);
+  return arc === 'low'
+    ? traj.exitAngle <= boundaryAngle + 1e-12
+    : traj.exitAngle >= boundaryAngle - 1e-12;
 }
 
 export function buildOptimalSequencePoints(
@@ -1386,6 +1432,7 @@ export function buildOptimalSequencePoints(
       exitAngle: best.exitAngle,
       trajId: best.id,
       groupId: g.id,
+      velocityBuffer: velocityBufferForTrajectory(g, best),
     });
   }
   points.sort((a, b) => a.dx - b.dx);
@@ -1484,41 +1531,65 @@ function isBetterPathScore(
   return false;
 }
 
+function pickBestTrajectoryForArcFallback(
+  groups: TrajGroup[],
+  trajMoeById: Map<string, TrajectoryMoe>,
+  arc: OptimalArc,
+): Set<string> {
+  const ids = new Set<string>();
+  for (const g of groups) {
+    const arcGroup = {
+      ...g,
+      trajectories: g.trajectories.filter((t) => isTrajectoryInArc(g, t, arc)),
+    };
+    const best = pickBestTrajectoryForGroup(arcGroup, trajMoeById);
+    if (best) ids.add(best.id);
+  }
+  return ids;
+}
+
 /**
- * Pick one trajectory per goal distance to maximize MOE while penalizing
- * large |d(speed)/dx|, |d(angle)/dx|, and |d²(speed)/dx²|, |d²(angle)/dx²|.
+ * Pick one trajectory per goal distance to maximize MOE while penalizing large
+ * |d(speed)/dx|, |d(angle)/dx|, and second derivatives. Candidates are limited
+ * by arc class and the velocity-buffer threshold line, with closest-buffer
+ * fallback when no trajectory in a class reaches the threshold.
  */
-export function pickOptimalTrajectoryPath(
+export function pickOptimalTrajectoryPathForArc(
   groups: TrajGroup[],
   trajMoeById: Map<string, TrajectoryMoe>,
   weights: OptimalPickWeights,
+  arc: OptimalArc,
 ): Set<string> {
   const sorted = [...groups].sort((a, b) => a.dx - b.dx || a.dy - b.dy);
   if (sorted.length === 0) return new Set();
-  if (sorted.length === 1) {
-    const best = pickBestTrajectoryForGroup(sorted[0], trajMoeById);
-    return best ? new Set([best.id]) : new Set();
-  }
 
   const moeScale = weights.moeScale ?? MOE_NORM_SCALE;
   type Cand = { traj: GeneratedTrajectory; moeTerm: number };
   const cands: Cand[][] = sorted.map((g) => {
+    const classTrajs = g.trajectories.filter((t) => isTrajectoryInArc(g, t, arc));
+    const threshold = velocityBufferThresholdAtDx(weights, g.dx);
+    let eligible = classTrajs.filter((t) => velocityBufferForTrajectory(g, t) >= threshold - 1e-12);
+    if (eligible.length === 0 && classTrajs.length > 0) {
+      const closestBuffer = Math.max(...classTrajs.map((t) => velocityBufferForTrajectory(g, t)));
+      eligible = classTrajs.filter((t) =>
+        Math.abs(velocityBufferForTrajectory(g, t) - closestBuffer) <= 1e-12
+      );
+    }
+
     const list: Cand[] = [];
-    for (const t of g.trajectories) {
+    for (const t of eligible) {
       const moe = trajMoeById.get(t.id);
       if (!moe) continue;
-      list.push({ traj: t, moeTerm: (weights.moeWeight * moe.combinedMoe) / moeScale });
+      list.push({
+        traj: t,
+        moeTerm: (weights.moeWeight * moe.combinedMoe) / moeScale,
+      });
     }
     return list;
   });
 
   if (cands.some((list) => list.length === 0)) {
-    const ids = new Set<string>();
-    for (const g of sorted) {
-      const best = pickBestTrajectoryForGroup(g, trajMoeById);
-      if (best) ids.add(best.id);
-    }
-    return ids;
+    return pickBestTrajectoryForArcFallback(sorted, trajMoeById, arc);
   }
 
   const n = sorted.length;
@@ -1534,9 +1605,12 @@ export function pickOptimalTrajectoryPath(
     for (let j = 0; j < cands[i].length; j++) {
       const curr = cands[i][j];
       let bestScore = -Infinity;
-      let bestK = 0;
+      let bestExitAngle = Infinity;
+      let bestK = -1;
       for (let k = 0; k < cands[i - 1].length; k++) {
         const prev = cands[i - 1][k];
+        const prevScore = dp[i - 1][k];
+        if (!Number.isFinite(prevScore)) continue;
         let penalty = segmentSmoothnessPenalty(
           prev.traj,
           curr.traj,
@@ -1558,15 +1632,17 @@ export function pickOptimalTrajectoryPath(
             );
           }
         }
-        const score = dp[i - 1][k] + curr.moeTerm - penalty;
+        const score = prevScore + curr.moeTerm - penalty;
         if (
-          bestScore === -Infinity ||
-          isBetterPathScore(score, curr.traj.exitAngle, bestScore, cands[i][bestK].traj.exitAngle)
+          bestK < 0 ||
+          isBetterPathScore(score, curr.traj.exitAngle, bestScore, bestExitAngle)
         ) {
           bestScore = score;
+          bestExitAngle = curr.traj.exitAngle;
           bestK = k;
         }
       }
+      if (bestK < 0) return pickBestTrajectoryForArcFallback(sorted, trajMoeById, arc);
       dp[i][j] = bestScore;
       parent[i][j] = bestK;
     }
@@ -1585,14 +1661,43 @@ export function pickOptimalTrajectoryPath(
   const picks = new Array<number>(n);
   picks[n - 1] = bestJ;
   for (let i = n - 1; i > 0; i--) {
-    picks[i - 1] = parent[i][picks[i]];
+    const pick = picks[i];
+    if (!Number.isInteger(pick) || pick < 0 || pick >= cands[i].length) {
+      return pickBestTrajectoryForArcFallback(sorted, trajMoeById, arc);
+    }
+    const prevPick = parent[i][pick];
+    if (!Number.isInteger(prevPick) || prevPick < 0 || prevPick >= cands[i - 1].length) {
+      return pickBestTrajectoryForArcFallback(sorted, trajMoeById, arc);
+    }
+    picks[i - 1] = prevPick;
   }
 
   const ids = new Set<string>();
   for (let i = 0; i < n; i++) {
+    if (!Number.isInteger(picks[i]) || picks[i] < 0 || picks[i] >= cands[i].length) {
+      return pickBestTrajectoryForArcFallback(sorted, trajMoeById, arc);
+    }
     ids.add(cands[i][picks[i]].traj.id);
   }
   return ids;
+}
+
+export function pickOptimalTrajectoryPaths(
+  groups: TrajGroup[],
+  trajMoeById: Map<string, TrajectoryMoe>,
+  weights: OptimalPickWeights,
+): { lowArcIds: Set<string>; highArcIds: Set<string>; allIds: Set<string> } {
+  const lowArcIds = pickOptimalTrajectoryPathForArc(groups, trajMoeById, weights, 'low');
+  const highArcIds = pickOptimalTrajectoryPathForArc(groups, trajMoeById, weights, 'high');
+  return { lowArcIds, highArcIds, allIds: new Set([...lowArcIds, ...highArcIds]) };
+}
+
+export function pickOptimalTrajectoryPath(
+  groups: TrajGroup[],
+  trajMoeById: Map<string, TrajectoryMoe>,
+  weights: OptimalPickWeights,
+): Set<string> {
+  return pickOptimalTrajectoryPaths(groups, trajMoeById, weights).allIds;
 }
 
 export function computeTrajectoryMoe(
@@ -1665,7 +1770,7 @@ export function computeTrajectoryMoe(
     MOE_ANGLE_MAX_DELTA,
   );
 
-  const speedMoe = computeWeightedSpeedMoe(speedMoePlus, speedMoeMinus);
+  const speedMoe = computeSpeedMoe(speedMoePlus, speedMoeMinus);
   const angleMoe = Math.min(angleMoePlus, angleMoeMinus);
   const combinedMoe = computeCombinedMoe(speedMoe, angleMoe);
 
@@ -2678,13 +2783,16 @@ export function groupExportPayload(
   errorTolerance: number,
   magnusPower = 2,
   goalPlaneAngleDeg = 0,
-  /** Index into group.trajectories (same order as exported trajectories[]). */
-  preferredOptimalIndex?: number,
+  /** Low-arc index into group.trajectories (same order as exported trajectories[]). */
+  preferredLowArcOptimalIndex?: number,
+  /** High-arc index into group.trajectories (same order as exported trajectories[]). */
+  preferredHighArcOptimalIndex?: number,
   optimizerParams?: TrajOptimizerParams,
 ) {
   const half = errorTolerance / 2;
   const effectiveMagnusPower = resolveMagnusPower(group.magnusPower ?? magnusPower);
-  let optimalTrajectoryIndex = -1;
+  let optimalLowArcTrajectoryIndex = -1;
+  let optimalHighArcTrajectoryIndex = -1;
   let bestCombined = -1;
   let bestExitAngle = Infinity;
 
@@ -2699,14 +2807,15 @@ export function groupExportPayload(
       effectiveMagnusPower,
       goalPlaneAngleDeg,
     );
-    if (preferredOptimalIndex === undefined && moe) {
+    if (preferredLowArcOptimalIndex === undefined && preferredHighArcOptimalIndex === undefined && moe) {
       if (
-        optimalTrajectoryIndex < 0 ||
+        optimalLowArcTrajectoryIndex < 0 ||
         isBetterOptimalTrajectory(moe.combinedMoe, t.exitAngle, bestCombined, bestExitAngle)
       ) {
         bestCombined = moe.combinedMoe;
         bestExitAngle = t.exitAngle;
-        optimalTrajectoryIndex = index;
+        optimalLowArcTrajectoryIndex = index;
+        optimalHighArcTrajectoryIndex = index;
       }
     }
 
@@ -2731,15 +2840,20 @@ export function groupExportPayload(
     return entry;
   });
 
-  if (preferredOptimalIndex !== undefined) {
-    optimalTrajectoryIndex = preferredOptimalIndex;
-  }
+  if (preferredLowArcOptimalIndex !== undefined) optimalLowArcTrajectoryIndex = preferredLowArcOptimalIndex;
+  if (preferredHighArcOptimalIndex !== undefined) optimalHighArcTrajectoryIndex = preferredHighArcOptimalIndex;
 
-  const validatedOptimalIndex =
-    Number.isInteger(optimalTrajectoryIndex) &&
-    optimalTrajectoryIndex >= 0 &&
-    optimalTrajectoryIndex < trajectories.length
-      ? optimalTrajectoryIndex
+  const validatedLowArcOptimalIndex =
+    Number.isInteger(optimalLowArcTrajectoryIndex) &&
+    optimalLowArcTrajectoryIndex >= 0 &&
+    optimalLowArcTrajectoryIndex < trajectories.length
+      ? optimalLowArcTrajectoryIndex
+      : undefined;
+  const validatedHighArcOptimalIndex =
+    Number.isInteger(optimalHighArcTrajectoryIndex) &&
+    optimalHighArcTrajectoryIndex >= 0 &&
+    optimalHighArcTrajectoryIndex < trajectories.length
+      ? optimalHighArcTrajectoryIndex
       : undefined;
 
   return {
@@ -2747,7 +2861,8 @@ export function groupExportPayload(
     dy: group.dy,
     dragCoeff: group.drag,
     magnusCoeff: group.magnus,
-    ...(validatedOptimalIndex !== undefined ? { optimalTrajectoryIndex: validatedOptimalIndex } : {}),
+    ...(validatedLowArcOptimalIndex !== undefined ? { optimalLowArcTrajectoryIndex: validatedLowArcOptimalIndex } : {}),
+    ...(validatedHighArcOptimalIndex !== undefined ? { optimalHighArcTrajectoryIndex: validatedHighArcOptimalIndex } : {}),
     ...(optimizerParams ? { optimizerParams } : {}),
     trajectories,
   };
@@ -2768,6 +2883,10 @@ export function trajOptimizerParamsFromGenParams(params: TrajGenParams): TrajOpt
     optimalAngleDerivWeight: params.optimalAngleDerivWeight,
     optimalSpeedSecondDerivWeight: params.optimalSpeedSecondDerivWeight,
     optimalAngleSecondDerivWeight: params.optimalAngleSecondDerivWeight,
+    optimalVelocityBufferLineX1: params.optimalVelocityBufferLineX1,
+    optimalVelocityBufferLineY1: params.optimalVelocityBufferLineY1,
+    optimalVelocityBufferLineX2: params.optimalVelocityBufferLineX2,
+    optimalVelocityBufferLineY2: params.optimalVelocityBufferLineY2,
   };
 }
 
@@ -2785,15 +2904,20 @@ export function downloadTrajectoriesArchive(
   const groupsWithTrajs = groups.filter((g) => g.trajectories.length > 0);
   if (groupsWithTrajs.length === 0) return;
 
-  const optimalIds =
+  const optimalPaths =
     trajMoeById && trajMoeById.size > 0
-      ? pickOptimalTrajectoryPath(groupsWithTrajs, trajMoeById, optimalPickWeightsFromParams(params))
-      : new Set<string>();
+      ? pickOptimalTrajectoryPaths(groupsWithTrajs, trajMoeById, optimalPickWeightsFromParams(params))
+      : { lowArcIds: new Set<string>(), highArcIds: new Set<string>(), allIds: new Set<string>() };
 
   const folderName = exportFolderName(params);
   const optimizerParams = trajOptimizerParamsFromGenParams(params);
   const entries = groupsWithTrajs.map((g) => {
-    const optimalIndex = g.trajectories.findIndex((t) => optimalIds.has(t.id));
+    const computedLowArcIndex = g.trajectories.findIndex((t) => optimalPaths.lowArcIds.has(t.id));
+    const computedHighArcIndex = g.trajectories.findIndex((t) => optimalPaths.highArcIds.has(t.id));
+    const optimalLowArcIndex =
+      g.optimalLowArcTrajectoryIndex !== undefined ? g.optimalLowArcTrajectoryIndex : computedLowArcIndex;
+    const optimalHighArcIndex =
+      g.optimalHighArcTrajectoryIndex !== undefined ? g.optimalHighArcTrajectoryIndex : computedHighArcIndex;
     return {
       name: `${folderName}/${groupExportFileName(g)}`,
       data: new TextEncoder().encode(JSON.stringify(
@@ -2802,7 +2926,8 @@ export function downloadTrajectoriesArchive(
           params.errorTolerance,
           resolveMagnusPower(params.magnusPower),
           params.goalPlaneAngleDeg,
-          optimalIndex >= 0 ? optimalIndex : undefined,
+          optimalLowArcIndex >= 0 ? optimalLowArcIndex : undefined,
+          optimalHighArcIndex >= 0 ? optimalHighArcIndex : undefined,
           optimizerParams,
         ),
         null,

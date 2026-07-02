@@ -6,6 +6,17 @@ export interface DualAxisPoint {
   right: number;
   /** Optional second series on the left y-axis (e.g. speed MOE upper bound). */
   leftExtra?: number;
+  groupId?: string;
+  trajId?: string;
+  velocityBuffer?: number;
+}
+
+export interface DualAxisRangeBar {
+  dx: number;
+  leftMin?: number;
+  leftMax?: number;
+  rightMin?: number;
+  rightMax?: number;
 }
 
 export interface DualAxisDistanceChartProps {
@@ -24,6 +35,13 @@ export interface DualAxisDistanceChartProps {
   yAxisFromZero?: boolean;
   /** Dashed zero line on the left axis when the range spans zero. */
   showZeroLine?: boolean;
+  /** Render only the left y-axis and left series. */
+  hideRightAxis?: boolean;
+  rangeBars?: DualAxisRangeBar[];
+  overlayLine?: { x1: number; y1: number; x2: number; y2: number; color?: string };
+  onOverlayLineChange?: (line: { x1: number; y1: number; x2: number; y2: number }) => void;
+  dragCandidates?: DualAxisPoint[];
+  onPointDragCommit?: (point: DualAxisPoint) => void;
   emptyMessage?: ReactNode;
   renderTooltip?: (point: DualAxisPoint) => ReactNode;
 }
@@ -92,7 +110,7 @@ function chartUiScale(cssH: number): number {
   return Math.max(1, Math.min(2.5, cssH / 280));
 }
 
-function chartPadding(cssH: number, uiScale: number) {
+function chartPadding(_cssH: number, uiScale: number) {
   return {
     padL: Math.round(58 * uiScale),
     padR: Math.round(58 * uiScale),
@@ -118,13 +136,39 @@ export default function DualAxisDistanceChart({
   leftExtraColor = DUAL_AXIS_LEFT_EXTRA_COLOR,
   yAxisFromZero = false,
   showZeroLine = false,
+  hideRightAxis = false,
+  rangeBars = [],
+  overlayLine,
+  onOverlayLineChange,
+  dragCandidates,
+  onPointDragCommit,
   emptyMessage,
   renderTooltip,
 }: DualAxisDistanceChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const layoutRef = useRef<PlotLayout | null>(null);
+  const rangesRef = useRef<{
+    leftMin: number;
+    leftMax: number;
+    rightMin: number;
+    rightMax: number;
+    xMin: number;
+    xMax: number;
+    padL: number;
+    padT: number;
+    plotW: number;
+    plotH: number;
+  } | null>(null);
+  const dragHandleRef = useRef<1 | 2 | null>(null);
+  const pointDragRef = useRef<{
+    pointerId: number;
+    sourceDx: number;
+    series: 'left' | 'right';
+    point: DualAxisPoint;
+  } | null>(null);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const [dragPoint, setDragPoint] = useState<DualAxisPoint | null>(null);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -146,7 +190,8 @@ export default function DualAxisDistanceChart({
 
     const uiScale = chartUiScale(cssH);
     const pad = chartPadding(cssH, uiScale);
-    const { padL, padR, padT, padB } = pad;
+    const { padL, padT, padB } = pad;
+    const padR = hideRightAxis ? Math.round(22 * uiScale) : pad.padR;
     const tickFont = `${Math.round(11 * uiScale)}px system-ui`;
     const legendFont = `${Math.round(12 * uiScale)}px system-ui`;
     const axisTitleFont = `${Math.round(11 * uiScale)}px system-ui`;
@@ -167,9 +212,20 @@ export default function DualAxisDistanceChart({
     const leftValues = points.flatMap((p) =>
       p.leftExtra !== undefined ? [p.left, p.leftExtra] : [p.left],
     );
+    for (const bar of rangeBars) {
+      if (bar.leftMin !== undefined) leftValues.push(bar.leftMin);
+      if (bar.leftMax !== undefined) leftValues.push(bar.leftMax);
+    }
+    if (overlayLine) leftValues.push(overlayLine.y1, overlayLine.y2);
     const leftRange = axisRange(leftValues, yAxisFromZero);
     const rightRange = axisRange(
-      points.map((p) => p.right),
+      [
+        ...points.map((p) => p.right),
+        ...rangeBars.flatMap((bar) => [
+          ...(bar.rightMin !== undefined ? [bar.rightMin] : []),
+          ...(bar.rightMax !== undefined ? [bar.rightMax] : []),
+        ]),
+      ],
       yAxisFromZero,
     );
     const leftStep = niceStep(leftRange.max - leftRange.min, 5);
@@ -180,6 +236,18 @@ export default function DualAxisDistanceChart({
       padT + plotH - ((v - leftRange.min) / (leftRange.max - leftRange.min)) * plotH;
     const toRightY = (v: number) =>
       padT + plotH - ((v - rightRange.min) / (rightRange.max - rightRange.min)) * plotH;
+    rangesRef.current = {
+      leftMin: leftRange.min,
+      leftMax: leftRange.max,
+      rightMin: rightRange.min,
+      rightMax: rightRange.max,
+      xMin,
+      xMax,
+      padL,
+      padT,
+      plotW,
+      plotH,
+    };
 
     ctx.strokeStyle = 'rgba(255,255,255,0.08)';
     ctx.lineWidth = gridLineWidth;
@@ -197,10 +265,12 @@ export default function DualAxisDistanceChart({
       ctx.fillText(formatTick(v), padL - pad.tickGap, y);
     }
 
-    for (let v = rightRange.min; v <= rightRange.max + rightStep * 0.001; v += rightStep) {
-      const y = toRightY(v);
-      ctx.textAlign = 'left';
-      ctx.fillText(formatTick(v), padL + plotW + pad.tickGap, y);
+    if (!hideRightAxis) {
+      for (let v = rightRange.min; v <= rightRange.max + rightStep * 0.001; v += rightStep) {
+        const y = toRightY(v);
+        ctx.textAlign = 'left';
+        ctx.fillText(formatTick(v), padL + plotW + pad.tickGap, y);
+      }
     }
 
     const xStep = niceStep(xMax - xMin, 6);
@@ -276,9 +346,57 @@ export default function DualAxisDistanceChart({
       }
     };
 
+    if (rangeBars.length > 0) {
+      ctx.lineWidth = 3 * uiScale;
+      ctx.lineCap = 'round';
+      for (const bar of rangeBars) {
+        const x = toX(bar.dx);
+        if (bar.leftMin !== undefined && bar.leftMax !== undefined) {
+          ctx.strokeStyle = '#1e3a8a';
+          ctx.beginPath();
+          ctx.moveTo(x - 2 * uiScale, toLeftY(bar.leftMin));
+          ctx.lineTo(x - 2 * uiScale, toLeftY(bar.leftMax));
+          ctx.stroke();
+        }
+        if (!hideRightAxis && bar.rightMin !== undefined && bar.rightMax !== undefined) {
+          ctx.strokeStyle = '#14532d';
+          ctx.beginPath();
+          ctx.moveTo(x + 2 * uiScale, toRightY(bar.rightMin));
+          ctx.lineTo(x + 2 * uiScale, toRightY(bar.rightMax));
+          ctx.stroke();
+        }
+      }
+      ctx.lineCap = 'butt';
+    }
+
     drawSeries(leftColor, toLeftY, 'left');
     if (hasLeftExtra) {
       drawSeries(leftExtraColor, toLeftY, 'leftExtra');
+    }
+
+    if (overlayLine) {
+      const color = overlayLine.color ?? '#fbbf24';
+      const lx1 = toX(overlayLine.x1);
+      const ly1 = toLeftY(overlayLine.y1);
+      const lx2 = toX(overlayLine.x2);
+      const ly2 = toLeftY(overlayLine.y2);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2 * uiScale;
+      ctx.setLineDash([7 * uiScale, 5 * uiScale]);
+      ctx.beginPath();
+      ctx.moveTo(lx1, ly1);
+      ctx.lineTo(lx2, ly2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      for (const [x, y] of [[lx1, ly1], [lx2, ly2]]) {
+        ctx.beginPath();
+        ctx.arc(x, y, 6 * uiScale, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.strokeStyle = '#111827';
+        ctx.lineWidth = 2 * uiScale;
+        ctx.stroke();
+      }
     }
 
     ctx.font = legendFont;
@@ -294,11 +412,33 @@ export default function DualAxisDistanceChart({
       ctx.textAlign = 'left';
       ctx.fillText(leftLegend, padL, pad.legendY);
     }
-    ctx.fillStyle = rightColor;
-    ctx.textAlign = 'right';
-    ctx.fillText(rightLegend, padL + plotW, pad.legendY);
+    if (!hideRightAxis) {
+      ctx.fillStyle = rightColor;
+      ctx.textAlign = 'right';
+      ctx.fillText(rightLegend, padL + plotW, pad.legendY);
+    }
 
-    drawSeries(rightColor, toRightY, 'right');
+    if (!hideRightAxis) {
+      drawSeries(rightColor, toRightY, 'right');
+    }
+
+    if (dragPoint) {
+      const x = toX(dragPoint.dx);
+      ctx.lineWidth = 2 * uiScale;
+      ctx.strokeStyle = '#ffffff';
+      ctx.fillStyle = leftColor;
+      ctx.beginPath();
+      ctx.arc(x, toLeftY(dragPoint.left), 6 * uiScale, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      if (!hideRightAxis) {
+        ctx.fillStyle = rightColor;
+        ctx.beginPath();
+        ctx.arc(x, toRightY(dragPoint.right), 6 * uiScale, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
 
     ctx.save();
     ctx.translate(pad.axisTitleInset, padT + plotH / 2);
@@ -309,14 +449,16 @@ export default function DualAxisDistanceChart({
     ctx.fillText(leftAxisTitle, 0, 0);
     ctx.restore();
 
-    ctx.save();
-    ctx.translate(cssW - pad.axisTitleInset, padT + plotH / 2);
-    ctx.rotate(Math.PI / 2);
-    ctx.textAlign = 'center';
-    ctx.fillStyle = 'rgba(156,163,175,0.85)';
-    ctx.font = axisTitleFont;
-    ctx.fillText(rightAxisTitle, 0, 0);
-    ctx.restore();
+    if (!hideRightAxis) {
+      ctx.save();
+      ctx.translate(cssW - pad.axisTitleInset, padT + plotH / 2);
+      ctx.rotate(Math.PI / 2);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = 'rgba(156,163,175,0.85)';
+      ctx.font = axisTitleFont;
+      ctx.fillText(rightAxisTitle, 0, 0);
+      ctx.restore();
+    }
 
     ctx.textAlign = 'center';
     ctx.textBaseline = 'bottom';
@@ -337,6 +479,10 @@ export default function DualAxisDistanceChart({
     leftExtraColor,
     yAxisFromZero,
     showZeroLine,
+    hideRightAxis,
+    rangeBars,
+    overlayLine,
+    dragPoint,
   ]);
 
   useEffect(() => { draw(); }, [draw]);
@@ -349,8 +495,74 @@ export default function DualAxisDistanceChart({
     return () => ro.disconnect();
   }, [draw]);
 
+  const dataPointFromMouse = useCallback((e: React.MouseEvent | MouseEvent): { x: number; y: number } | null => {
+    const ranges = rangesRef.current;
+    const canvas = canvasRef.current;
+    if (!ranges || !canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const xRatio = (mx - ranges.padL) / ranges.plotW;
+    const yRatio = (my - ranges.padT) / ranges.plotH;
+    return {
+      x: ranges.xMin + Math.max(0, Math.min(1, xRatio)) * (ranges.xMax - ranges.xMin),
+      y: ranges.leftMax - Math.max(0, Math.min(1, yRatio)) * (ranges.leftMax - ranges.leftMin),
+    };
+  }, []);
+
+  const pointScreenPosition = useCallback((
+    point: DualAxisPoint,
+    series: 'left' | 'right',
+  ): { x: number; y: number } | null => {
+    const ranges = rangesRef.current;
+    if (!ranges) return null;
+    const x = ranges.padL + ((point.dx - ranges.xMin) / (ranges.xMax - ranges.xMin)) * ranges.plotW;
+    const value = series === 'left' ? point.left : point.right;
+    const min = series === 'left' ? ranges.leftMin : ranges.rightMin;
+    const max = series === 'left' ? ranges.leftMax : ranges.rightMax;
+    const y = ranges.padT + ranges.plotH - ((value - min) / (max - min)) * ranges.plotH;
+    return { x, y };
+  }, []);
+
+  const nearestDragCandidate = useCallback((
+    sourceDx: number,
+    series: 'left' | 'right',
+    clientX: number,
+    clientY: number,
+  ): DualAxisPoint | null => {
+    const canvas = canvasRef.current;
+    if (!canvas || !dragCandidates || dragCandidates.length === 0) return null;
+    const rect = canvas.getBoundingClientRect();
+    const mx = clientX - rect.left;
+    const my = clientY - rect.top;
+    const candidates = dragCandidates.filter((p) => Math.abs(p.dx - sourceDx) <= 1e-9);
+    let best: DualAxisPoint | null = null;
+    let bestDist = Infinity;
+    for (const candidate of candidates) {
+      const pos = pointScreenPosition(candidate, series);
+      if (!pos) continue;
+      const d = Math.hypot(mx - pos.x, my - pos.y);
+      if (d < bestDist) {
+        bestDist = d;
+        best = candidate;
+      }
+    }
+    return best;
+  }, [dragCandidates, pointScreenPosition]);
+
   const handleMouseMove = useCallback(
     (e: React.MouseEvent) => {
+      if (pointDragRef.current) return;
+      if (dragHandleRef.current && overlayLine && onOverlayLineChange) {
+        const p = dataPointFromMouse(e);
+        if (!p) return;
+        if (dragHandleRef.current === 1) {
+          onOverlayLineChange({ ...overlayLine, x1: p.x, y1: Math.max(0, p.y) });
+        } else {
+          onOverlayLineChange({ ...overlayLine, x2: p.x, y2: Math.max(0, p.y) });
+        }
+        return;
+      }
       const layout = layoutRef.current;
       const canvas = canvasRef.current;
       if (!layout || !canvas || points.length === 0) {
@@ -386,12 +598,109 @@ export default function DualAxisDistanceChart({
       }
       setHoverIdx(bestIdx);
     },
-    [points],
+    [points, overlayLine, onOverlayLineChange, dataPointFromMouse],
   );
 
-  const handleMouseLeave = useCallback(() => setHoverIdx(null), []);
+  const handleMouseLeave = useCallback(() => {
+    if (!dragHandleRef.current && !pointDragRef.current) setHoverIdx(null);
+  }, []);
 
-  const hoverPoint = hoverIdx !== null ? points[hoverIdx] : null;
+  const handlePointerDown = useCallback((e: React.PointerEvent) => {
+    const ranges = rangesRef.current;
+    const canvas = canvasRef.current;
+    if (!ranges || !canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+
+    if (overlayLine && onOverlayLineChange) {
+      const toX = (x: number) => ranges.padL + ((x - ranges.xMin) / (ranges.xMax - ranges.xMin)) * ranges.plotW;
+      const toY = (y: number) =>
+        ranges.padT + ranges.plotH - ((y - ranges.leftMin) / (ranges.leftMax - ranges.leftMin)) * ranges.plotH;
+      const d1 = Math.hypot(mx - toX(overlayLine.x1), my - toY(overlayLine.y1));
+      const d2 = Math.hypot(mx - toX(overlayLine.x2), my - toY(overlayLine.y2));
+      const nearest = d1 <= d2 ? 1 : 2;
+      if (Math.min(d1, d2) <= 18) {
+        dragHandleRef.current = nearest;
+        canvas.setPointerCapture(e.pointerId);
+        e.preventDefault();
+        return;
+      }
+    }
+
+    if (!onPointDragCommit || !dragCandidates || dragCandidates.length === 0) return;
+    let bestStart: { point: DualAxisPoint; series: 'left' | 'right'; dist: number } | null = null;
+    for (const point of points) {
+      for (const series of ['left', 'right'] as const) {
+        if (series === 'right' && hideRightAxis) continue;
+        const pos = pointScreenPosition(point, series);
+        if (!pos) continue;
+        const dist = Math.hypot(mx - pos.x, my - pos.y);
+        if (!bestStart || dist < bestStart.dist) {
+          bestStart = { point, series, dist };
+        }
+      }
+    }
+    if (!bestStart || bestStart.dist > 16) return;
+    const candidate = nearestDragCandidate(bestStart.point.dx, bestStart.series, e.clientX, e.clientY) ?? bestStart.point;
+    pointDragRef.current = {
+      pointerId: e.pointerId,
+      sourceDx: bestStart.point.dx,
+      series: bestStart.series,
+      point: candidate,
+    };
+    setDragPoint(candidate);
+    canvas.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  }, [
+    dragCandidates,
+    hideRightAxis,
+    nearestDragCandidate,
+    onOverlayLineChange,
+    onPointDragCommit,
+    overlayLine,
+    pointScreenPosition,
+    points,
+  ]);
+
+  const handlePointerMove = useCallback((e: React.PointerEvent) => {
+    if (pointDragRef.current) {
+      const drag = pointDragRef.current;
+      const candidate = nearestDragCandidate(drag.sourceDx, drag.series, e.clientX, e.clientY);
+      if (candidate) {
+        pointDragRef.current = { ...drag, point: candidate };
+        setDragPoint(candidate);
+      }
+      return;
+    }
+    if (!dragHandleRef.current || !overlayLine || !onOverlayLineChange) return;
+    const p = dataPointFromMouse(e.nativeEvent);
+    if (!p) return;
+    if (dragHandleRef.current === 1) {
+      onOverlayLineChange({ ...overlayLine, x1: p.x, y1: Math.max(0, p.y) });
+    } else {
+      onOverlayLineChange({ ...overlayLine, x2: p.x, y2: Math.max(0, p.y) });
+    }
+  }, [nearestDragCandidate, overlayLine, onOverlayLineChange, dataPointFromMouse]);
+
+  const handlePointerUp = useCallback((e: React.PointerEvent) => {
+    if (pointDragRef.current) {
+      const point = pointDragRef.current.point;
+      if (canvasRef.current?.hasPointerCapture(e.pointerId)) {
+        canvasRef.current.releasePointerCapture(e.pointerId);
+      }
+      pointDragRef.current = null;
+      setDragPoint(null);
+      onPointDragCommit?.(point);
+      return;
+    }
+    if (dragHandleRef.current && canvasRef.current?.hasPointerCapture(e.pointerId)) {
+      canvasRef.current.releasePointerCapture(e.pointerId);
+    }
+    dragHandleRef.current = null;
+  }, [onPointDragCommit]);
+
+  const hoverPoint = dragPoint ?? (hoverIdx !== null ? points[hoverIdx] : null);
 
   if (points.length === 0) {
     return (
@@ -408,6 +717,10 @@ export default function DualAxisDistanceChart({
         className="w-full h-full min-h-[inherit] block"
         onMouseMove={handleMouseMove}
         onMouseLeave={handleMouseLeave}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
       />
       {hoverPoint && renderTooltip && (
         <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 pointer-events-none px-3 py-2 rounded bg-gray-900 border border-gray-600 text-xs shadow-lg tabular-nums space-y-0.5">

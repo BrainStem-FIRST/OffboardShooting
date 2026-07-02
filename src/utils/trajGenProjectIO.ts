@@ -1,7 +1,7 @@
 import type { TrajGenParams, TrajGroup, TrajOptimizerParams } from '../types';
 import {
   groupExportPayload,
-  pickOptimalTrajectoryPath,
+  pickOptimalTrajectoryPaths,
   optimalPickWeightsFromParams,
   resolveMagnusPower,
   trajOptimizerParamsFromGenParams,
@@ -62,20 +62,26 @@ export function buildTrajGenProjectPayload(
   const normalizedParams = normalizeTrajGenParamsValue(params) ?? params;
   const optimizerParams = trajOptimizerParamsFromGenParams(normalizedParams);
   const groupsWithTrajs = groups.filter((g) => g.trajectories.length > 0);
-  const optimalIds =
+  const optimalPaths =
     trajMoeById && trajMoeById.size > 0
-      ? pickOptimalTrajectoryPath(groupsWithTrajs, trajMoeById, optimalPickWeightsFromParams(normalizedParams))
-      : new Set<string>();
+      ? pickOptimalTrajectoryPaths(groupsWithTrajs, trajMoeById, optimalPickWeightsFromParams(normalizedParams))
+      : { lowArcIds: new Set<string>(), highArcIds: new Set<string>(), allIds: new Set<string>() };
 
   const magnusPower = resolveMagnusPower(normalizedParams.magnusPower);
   const exportedGroups = groupsWithTrajs.map((g) => {
-    const optimalIndex = g.trajectories.findIndex((t) => optimalIds.has(t.id));
+    const computedLowArcIndex = g.trajectories.findIndex((t) => optimalPaths.lowArcIds.has(t.id));
+    const computedHighArcIndex = g.trajectories.findIndex((t) => optimalPaths.highArcIds.has(t.id));
+    const optimalLowArcIndex =
+      g.optimalLowArcTrajectoryIndex !== undefined ? g.optimalLowArcTrajectoryIndex : computedLowArcIndex;
+    const optimalHighArcIndex =
+      g.optimalHighArcTrajectoryIndex !== undefined ? g.optimalHighArcTrajectoryIndex : computedHighArcIndex;
     return groupExportPayload(
       g,
       normalizedParams.errorTolerance,
       magnusPower,
       normalizedParams.goalPlaneAngleDeg,
-      optimalIndex >= 0 ? optimalIndex : undefined,
+      optimalLowArcIndex >= 0 ? optimalLowArcIndex : undefined,
+      optimalHighArcIndex >= 0 ? optimalHighArcIndex : undefined,
     );
   });
 
@@ -255,7 +261,7 @@ export async function pickTrajGenProjectForOpen(): Promise<
   try {
     const [handle] = await window.showOpenFilePicker({
       multiple: false,
-      mode: 'readwrite',
+      mode: 'read',
       types: [
         {
           description: 'Trajectory generation project',
