@@ -4,6 +4,8 @@ export interface DualAxisPoint {
   dx: number;
   left: number;
   right: number;
+  /** Optional second series on the left y-axis (e.g. speed MOE upper bound). */
+  leftExtra?: number;
 }
 
 export interface DualAxisDistanceChartProps {
@@ -15,6 +17,9 @@ export interface DualAxisDistanceChartProps {
   xAxisTitle?: string;
   leftColor?: string;
   rightColor?: string;
+  /** Legend and color for optional second left-axis series. */
+  leftExtraLegend?: string;
+  leftExtraColor?: string;
   /** Scale y axes from 0 to max instead of auto min/max. */
   yAxisFromZero?: boolean;
   /** Dashed zero line on the left axis when the range spans zero. */
@@ -35,6 +40,7 @@ interface PlotLayout {
 }
 
 export const DUAL_AXIS_LEFT_COLOR = '#60a5fa';
+export const DUAL_AXIS_LEFT_EXTRA_COLOR = '#93c5fd';
 export const DUAL_AXIS_RIGHT_COLOR = '#34d399';
 
 function niceStep(range: number, targetTicks: number): number {
@@ -108,6 +114,8 @@ export default function DualAxisDistanceChart({
   xAxisTitle = 'Distance from goal (m)',
   leftColor = DUAL_AXIS_LEFT_COLOR,
   rightColor = DUAL_AXIS_RIGHT_COLOR,
+  leftExtraLegend,
+  leftExtraColor = DUAL_AXIS_LEFT_EXTRA_COLOR,
   yAxisFromZero = false,
   showZeroLine = false,
   emptyMessage,
@@ -155,10 +163,11 @@ export default function DualAxisDistanceChart({
     const { xMin, xMax } = xDomain(points);
     layoutRef.current = { padL, padR, padT, padB, plotW, plotH, xMin, xMax };
 
-    const leftRange = axisRange(
-      points.map((p) => p.left),
-      yAxisFromZero,
+    const hasLeftExtra = points.some((p) => p.leftExtra !== undefined);
+    const leftValues = points.flatMap((p) =>
+      p.leftExtra !== undefined ? [p.left, p.leftExtra] : [p.left],
     );
+    const leftRange = axisRange(leftValues, yAxisFromZero);
     const rightRange = axisRange(
       points.map((p) => p.right),
       yAxisFromZero,
@@ -229,22 +238,31 @@ export default function DualAxisDistanceChart({
       ctx.setLineDash([]);
     }
 
-    const drawSeries = (color: string, toY: (v: number) => number, key: 'left' | 'right') => {
+    const drawSeries = (color: string, toY: (v: number) => number, key: 'left' | 'right' | 'leftExtra') => {
       ctx.lineWidth = seriesLineWidth;
       ctx.strokeStyle = color;
       ctx.beginPath();
-      points.forEach((p, i) => {
+      let started = false;
+      points.forEach((p) => {
+        const v = key === 'leftExtra' ? p.leftExtra : p[key];
+        if (v === undefined) return;
         const x = toX(p.dx);
-        const y = toY(p[key]);
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+        const y = toY(v);
+        if (!started) {
+          ctx.moveTo(x, y);
+          started = true;
+        } else {
+          ctx.lineTo(x, y);
+        }
       });
       ctx.stroke();
 
       for (let i = 0; i < points.length; i++) {
         const p = points[i];
+        const v = key === 'leftExtra' ? p.leftExtra : p[key];
+        if (v === undefined) continue;
         const x = toX(p.dx);
-        const y = toY(p[key]);
+        const y = toY(v);
         const hovered = hoverIdx === i;
         ctx.beginPath();
         ctx.arc(x, y, hovered ? pointRadiusHover : pointRadius, 0, Math.PI * 2);
@@ -259,16 +277,28 @@ export default function DualAxisDistanceChart({
     };
 
     drawSeries(leftColor, toLeftY, 'left');
-    drawSeries(rightColor, toRightY, 'right');
+    if (hasLeftExtra) {
+      drawSeries(leftExtraColor, toLeftY, 'leftExtra');
+    }
 
     ctx.font = legendFont;
     ctx.textBaseline = 'middle';
-    ctx.fillStyle = leftColor;
-    ctx.textAlign = 'left';
-    ctx.fillText(leftLegend, padL, pad.legendY);
+    if (hasLeftExtra && leftExtraLegend) {
+      ctx.fillStyle = leftColor;
+      ctx.textAlign = 'left';
+      ctx.fillText(leftLegend, padL, pad.legendY);
+      ctx.fillStyle = leftExtraColor;
+      ctx.fillText(leftExtraLegend, padL, pad.legendY + Math.round(14 * uiScale));
+    } else {
+      ctx.fillStyle = leftColor;
+      ctx.textAlign = 'left';
+      ctx.fillText(leftLegend, padL, pad.legendY);
+    }
     ctx.fillStyle = rightColor;
     ctx.textAlign = 'right';
     ctx.fillText(rightLegend, padL + plotW, pad.legendY);
+
+    drawSeries(rightColor, toRightY, 'right');
 
     ctx.save();
     ctx.translate(pad.axisTitleInset, padT + plotH / 2);
@@ -303,6 +333,8 @@ export default function DualAxisDistanceChart({
     xAxisTitle,
     leftColor,
     rightColor,
+    leftExtraLegend,
+    leftExtraColor,
     yAxisFromZero,
     showZeroLine,
   ]);

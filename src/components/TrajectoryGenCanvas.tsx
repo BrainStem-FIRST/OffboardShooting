@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { TrajGenParams, TrajGroup, GeneratedTrajectory } from '../types';
-import { simulateShot, SIM_MAX_TIME, SIM_DT, enumerateDxValues, resolveMagnusPower, goalPlaneSegment, formatMoeBounds, type TrajectoryMoe } from '../simulation';
+import { simulateShot, SIM_MAX_TIME, SIM_DT, enumerateDxValues, resolveMagnusPower, goalPlaneSegment, formatMoeBounds, formatSpeedMoeBounds, type TrajectoryMoe } from '../simulation';
 
 interface Props {
   params: TrajGenParams;
@@ -8,7 +8,7 @@ interface Props {
   selectedGroupId: string | null;
   hoveredId: string | null;
   showAll: boolean;
-  showBiggestMoe: boolean;
+  showOptimalTrajectories: boolean;
   trajMoeById: Map<string, TrajectoryMoe>;
   bestMoeTrajIds: Set<string>;
   onHoverTraj: (id: string | null) => void;
@@ -75,7 +75,7 @@ function hitTestPolylines(polylines: HitPolyline[], mx: number, my: number): Hit
 }
 
 export default function TrajectoryGenCanvas({
-  params, groups, selectedGroupId, hoveredId, showAll, showBiggestMoe,
+  params, groups, selectedGroupId, hoveredId, showAll, showOptimalTrajectories,
   trajMoeById, bestMoeTrajIds, onHoverTraj,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -243,7 +243,7 @@ export default function TrajectoryGenCanvas({
     const activeMagnusPower = resolveMagnusPower(params.magnusPower);
 
     type TrajDrawEntry = { traj: GeneratedTrajectory; drag: number; magnus: number; dx: number; dy: number };
-    const trajEntries: TrajDrawEntry[] = showBiggestMoe
+    const trajEntries: TrajDrawEntry[] = showOptimalTrajectories
       ? groups.flatMap((g) => {
           const best = g.trajectories.find((t) => bestMoeTrajIds.has(t.id));
           return best ? [{ traj: best, drag: g.drag, magnus: g.magnus, dx: g.dx, dy: g.dy }] : [];
@@ -320,7 +320,7 @@ export default function TrajectoryGenCanvas({
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     ctx.fillText('exit position', rdx, rdy + 8);
-  }, [params, groups, selectedGroupId, hoveredId, showAll, showBiggestMoe, bestMoeTrajIds]);
+  }, [params, groups, selectedGroupId, hoveredId, showAll, showOptimalTrajectories, bestMoeTrajIds]);
 
   useEffect(() => { draw(); }, [draw]);
 
@@ -453,7 +453,7 @@ export default function TrajectoryGenCanvas({
             Speed <span className="text-white font-mono">{tooltip.exitVelocity.toFixed(3)} m/s</span>
             {tooltip.speedMoeMinus !== null && tooltip.speedMoePlus !== null && (
               <span className="text-gray-500 font-mono">
-                {' '}{formatMoeBounds(tooltip.speedMoeMinus, tooltip.speedMoePlus, 3)}
+                {' '}{formatSpeedMoeBounds({ speedMoeMinus: tooltip.speedMoeMinus, speedMoePlus: tooltip.speedMoePlus })}
               </span>
             )}
           </div>

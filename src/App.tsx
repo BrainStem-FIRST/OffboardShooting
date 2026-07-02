@@ -74,10 +74,10 @@ const DEFAULT_TRAJGEN_PARAMS: TrajGenParams = {
   magnusGain: 0,
   magnusPower: 1,
   optimalMoeWeight: 1,
-  optimalSpeedDerivWeight: 0.3,
-  optimalAngleDerivWeight: 0.3,
-  optimalSpeedSecondDerivWeight: 0.1,
-  optimalAngleSecondDerivWeight: 0.1,
+  optimalSpeedDerivWeight: 0.15,
+  optimalAngleDerivWeight: 0.03,
+  optimalSpeedSecondDerivWeight: 0.01,
+  optimalAngleSecondDerivWeight: 0.01,
 };
 
 function ResizeHandle({ onMouseDown }: { onMouseDown: (e: React.MouseEvent) => void }) {
@@ -132,7 +132,7 @@ export default function App() {
   const [genProgress, setGenProgress] = useState<TrajGenProgress | null>(null);
   const [hoveredTrajId, setHoveredTrajId] = useState<string | null>(null);
   const [showAllTrajGenTrajectories, setShowAllTrajGenTrajectories] = useState(false);
-  const [showBiggestMoeTrajGen, setShowBiggestMoeTrajGen] = useState(false);
+  const [showOptimalTrajectoriesTrajGen, setShowOptimalTrajectoriesTrajGen] = useState(false);
   const [trajMoeById, setTrajMoeById] = useState<Map<string, TrajectoryMoe>>(() => new Map());
   const [moeRecalculating, setMoeRecalculating] = useState(false);
   const [moeRecalcProgress, setMoeRecalcProgress] = useState<MoeRecalcProgress | null>(null);
@@ -209,11 +209,11 @@ export default function App() {
 
   const handleShowAllTrajGenChange = useCallback((checked: boolean) => {
     setShowAllTrajGenTrajectories(checked);
-    if (checked) setShowBiggestMoeTrajGen(false);
+    if (checked) setShowOptimalTrajectoriesTrajGen(false);
   }, []);
 
-  const handleShowBiggestMoeTrajGenChange = useCallback((checked: boolean) => {
-    setShowBiggestMoeTrajGen(checked);
+  const handleShowOptimalTrajectoriesTrajGenChange = useCallback((checked: boolean) => {
+    setShowOptimalTrajectoriesTrajGen(checked);
     if (checked) setShowAllTrajGenTrajectories(false);
   }, []);
 
@@ -221,7 +221,7 @@ export default function App() {
     setTrajGenParams((p) => ({ ...p, errorTolerance, goalPlaneAngleDeg }));
     const cleaned = trajGroupsRef.current.map((g) => ({
       ...g,
-      biggestMOETrajectory: undefined,
+      optimalTrajectoryIndex: undefined,
       trajectories: g.trajectories.map(
         ({ speedMoe, angleMoe, speedMoeMinus, speedMoePlus, angleMoeMinus, angleMoePlus, ...t }) => t,
       ),
@@ -1025,7 +1025,9 @@ export default function App() {
               selectedGroupId={selectedGroup?.id ?? null}
               hoveredId={hoveredTrajId}
               showAll={showAllTrajGenTrajectories}
-              showBiggestMoe={showBiggestMoeTrajGen}
+              onShowAllChange={handleShowAllTrajGenChange}
+              showOptimalTrajectories={showOptimalTrajectoriesTrajGen}
+              onShowOptimalTrajectoriesChange={handleShowOptimalTrajectoriesTrajGenChange}
               trajMoeById={trajMoeById}
               bestMoeTrajIds={bestMoeTrajIds}
               onHoverTraj={setHoveredTrajId}
@@ -1062,10 +1064,6 @@ export default function App() {
                 hoveredTrajId={hoveredTrajId}
                 trajMoeById={trajMoeById}
                 bestMoeTrajIds={bestMoeTrajIds}
-                showAll={showAllTrajGenTrajectories}
-                onShowAllChange={handleShowAllTrajGenChange}
-                showBiggestMoe={showBiggestMoeTrajGen}
-                onShowBiggestMoeChange={handleShowBiggestMoeTrajGenChange}
                 onSelectGroup={setSelectedGroupId}
                 onHoverTraj={setHoveredTrajId}
                 onDeleteTraj={handleDeleteTraj}

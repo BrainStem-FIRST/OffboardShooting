@@ -1,15 +1,70 @@
-import type { GeneratedTrajectory, TrajGenParams, TrajGroup } from '../types';
+import type { GeneratedTrajectory, TrajGenParams, TrajGroup, TrajOptimizerParams } from '../types';
+import { DEFAULT_TRAJ_OPTIMIZER_PARAMS } from '../types';
 import {
   groupExportFileName,
   groupExportPayload,
   resolveMagnusPower,
   pickOptimalTrajectoryPath,
   optimalPickWeightsFromParams,
+  trajOptimizerParamsFromGenParams,
   type TrajectoryMoe,
 } from '../simulation';
 import { pickFolderForImport } from './projectIO';
 
 const TRAJ_GROUP_FILE_RE = /^\([\d.eE+-]+,\s*[\d.eE+-]+\)\.json$/;
+
+/** JSON key for the optimal trajectory index in group export files. */
+export const OPTIMAL_TRAJECTORY_INDEX_KEY = 'optimalTrajectoryIndex';
+
+export const OPTIMIZER_PARAMS_FILE_NAME = 'optimizer_params.json';
+
+const OPTIMIZER_PARAM_KEYS = [
+  'optimalMoeWeight',
+  'optimalSpeedDerivWeight',
+  'optimalAngleDerivWeight',
+  'optimalSpeedSecondDerivWeight',
+  'optimalAngleSecondDerivWeight',
+] as const satisfies readonly (keyof TrajOptimizerParams)[];
+
+function readOptimalTrajectoryIndex(record: Record<string, unknown>): number | undefined {
+  const primary = record[OPTIMAL_TRAJECTORY_INDEX_KEY];
+  if (typeof primary === 'number' && Number.isInteger(primary)) return primary;
+  const legacy = record.biggestMOETrajectory;
+  if (typeof legacy === 'number' && Number.isInteger(legacy)) return legacy;
+  return undefined;
+}
+
+/** Parse optimizer weights from a trajectory group JSON object or sidecar file payload. */
+export function parseOptimizerParams(value: unknown): TrajOptimizerParams | null {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  const nested =
+    record.optimizerParams && typeof record.optimizerParams === 'object'
+      ? (record.optimizerParams as Record<string, unknown>)
+      : record;
+
+  const partial: Partial<TrajOptimizerParams> = {};
+  for (const key of OPTIMIZER_PARAM_KEYS) {
+    const v = nested[key];
+    if (typeof v === 'number' && Number.isFinite(v)) {
+      partial[key] = v;
+    }
+  }
+  if (Object.keys(partial).length === 0) return null;
+
+  return {
+    ...DEFAULT_TRAJ_OPTIMIZER_PARAMS,
+    ...partial,
+  };
+}
+
+export function parseOptimizerParamsFromGroupText(text: string): TrajOptimizerParams | null {
+  try {
+    return parseOptimizerParams(JSON.parse(text));
+  } catch {
+    return null;
+  }
+}
 
 export function isTrajGroupFileName(name: string): boolean {
   return TRAJ_GROUP_FILE_RE.test(name);
@@ -26,6 +81,8 @@ export function parseTrajGroupJson(json: unknown, batchId = Date.now()): TrajGro
     return null;
   }
   if (!Array.isArray(record.trajectories)) return null;
+
+  const optimalTrajectoryIndex = readOptimalTrajectoryIndex(record);
 
   const trajs: GeneratedTrajectory[] = (record.trajectories as Record<string, number>[]).map((t, i) => ({
     id: `import-${batchId}-${i}-${Math.random().toString(36).slice(2)}`,
@@ -49,6 +106,11 @@ export function parseTrajGroupJson(json: unknown, batchId = Date.now()): TrajGro
     drag: importedDrag,
     magnus: importedMagnus,
     trajectories: trajs,
+    ...(optimalTrajectoryIndex !== undefined &&
+    optimalTrajectoryIndex >= 0 &&
+    optimalTrajectoryIndex < trajs.length
+      ? { optimalTrajectoryIndex }
+      : {}),
   };
 }
 
@@ -128,8 +190,20 @@ async function resolveTrajWriteDirectory(
   return null;
 }
 
+async function readOptimizerParamsFromDir(
+  dir: FileSystemDirectoryHandle,
+): Promise<TrajOptimizerParams | null> {
+  try {
+    const handle = await dir.getFileHandle(OPTIMIZER_PARAMS_FILE_NAME);
+    const text = await (await handle.getFile()).text();
+    return parseOptimizerParamsFromGroupText(text);
+  } catch {
+    return null;
+  }
+}
+
 export type LoadTrajFolderResult =
-  | { ok: true; groups: TrajGroup[]; warnings: string[]; writeDir: FileSystemDirectoryHandle }
+  | { ok: true; groups: TrajGroup[]; warnings: string[]; writeDir: FileSystemDirectoryHandle; optimizerParams: TrajOptimizerParams | null }
   | { ok: false; cancelled: boolean; message: string };
 
 export type SaveTrajFolderResult =
@@ -158,9 +232,15 @@ export async function loadTrajGroupsFromDirectory(
 
   const { writeDir, files } = resolved;
 
+  let optimizerParams = await readOptimizerParamsFromDir(writeDir);
+
   for (const { name, handle } of files) {
+    if (name === OPTIMIZER_PARAMS_FILE_NAME) continue;
     try {
       const text = await (await handle.getFile()).text();
+      if (!optimizerParams) {
+        optimizerParams = parseOptimizerParamsFromGroupText(text);
+      }
       const group = parseTrajGroupFromText(text);
       if (!group) {
         warnings.push(`Skipped "${name}": missing dragCoeff, magnusCoeff, dx, dy, or trajectories.`);
@@ -188,7 +268,7 @@ export async function loadTrajGroupsFromDirectory(
   }
 
   groups.sort((a, b) => a.dx - b.dx || a.dy - b.dy);
-  return { ok: true, groups, warnings, writeDir };
+  return { ok: true, groups, warnings, writeDir, optimizerParams };
 }
 
 export async function saveTrajGroupsToDirectory(
@@ -212,18 +292,34 @@ export async function saveTrajGroupsToDirectory(
       ? pickOptimalTrajectoryPath(groupsWithTrajs, trajMoeById, optimalPickWeightsFromParams(params as TrajGenParams))
       : new Set<string>();
 
+  const optimizerParams = trajOptimizerParamsFromGenParams(params as TrajGenParams);
+
+  try {
+    await writeTextToFile(
+      writeDir,
+      OPTIMIZER_PARAMS_FILE_NAME,
+      JSON.stringify({ version: 1, optimizerParams }, null, 4),
+    );
+  } catch (err) {
+    return {
+      ok: false,
+      message: `Failed to save "${OPTIMIZER_PARAMS_FILE_NAME}": ${(err as Error).message}`,
+    };
+  }
+
   for (let i = 0; i < groupsWithTrajs.length; i++) {
     const group = groupsWithTrajs[i];
     onProgress?.(i + 1, groupsWithTrajs.length);
     const fileName = groupExportFileName(group);
-    const optimalTraj = group.trajectories.find((t) => optimalIds.has(t.id));
+    const optimalIndex = group.trajectories.findIndex((t) => optimalIds.has(t.id));
     const text = JSON.stringify(
       groupExportPayload(
         group,
         params.errorTolerance,
         resolveMagnusPower(params.magnusPower),
         params.goalPlaneAngleDeg,
-        optimalTraj?.id,
+        optimalIndex >= 0 ? optimalIndex : undefined,
+        optimizerParams,
       ),
       null,
       4,

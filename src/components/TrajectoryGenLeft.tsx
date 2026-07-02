@@ -1,14 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { TrajGenParams } from '../types';
 import { countTrajGenSearchSteps, type TrajGenProgress } from '../simulation';
-import { Play, Loader, RefreshCw, Save, Upload } from 'lucide-react';
+import { Play, Loader, RefreshCw } from 'lucide-react';
 import { CheckboxLabel } from './Checkbox';
 import {
   panelAside, panelContent, panelSectionTitle, panelSubsectionTitle, panelLabel,
   panelLabelInline, panelInput, panelBody, panelHint, panelBtnPrimary, panelMeta,
 } from './panelStyles';
 import { ProgressBar } from './ProgressBar';
-import { downloadTrajGenSettings, parseTrajGenSettings } from '../utils/trajGenSettingsIO';
 
 interface Props {
   params: TrajGenParams;
@@ -213,35 +212,8 @@ export default function TrajectoryGenLeft({
   params, onChange, onGenerate, onRefine,
   generating, refining, canRefine, genProgress, width,
 }: Props) {
-  const importInputRef = useRef<HTMLInputElement>(null);
-  const [settingsStatus, setSettingsStatus] = useState<{ ok: boolean; text: string } | null>(null);
-
   function set<K extends keyof TrajGenParams>(key: K, val: TrajGenParams[K]) {
     onChange({ ...params, [key]: val });
-  }
-
-  function handleSaveSettings() {
-    downloadTrajGenSettings(params);
-    setSettingsStatus({ ok: true, text: 'Settings saved to trajgen_settings.json.' });
-  }
-
-  function handleImportFile(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    e.target.value = '';
-    setSettingsStatus(null);
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      const imported = parseTrajGenSettings(ev.target?.result as string);
-      if (!imported) {
-        setSettingsStatus({ ok: false, text: 'Invalid settings file. Expected trajgen_settings.json format.' });
-        return;
-      }
-      onChange(imported);
-      setSettingsStatus({ ok: true, text: `Loaded settings from ${file.name}.` });
-    };
-    reader.onerror = () => setSettingsStatus({ ok: false, text: 'Failed to read file.' });
-    reader.readAsText(file);
   }
 
   const busy = generating || refining;
@@ -360,47 +332,6 @@ export default function TrajectoryGenLeft({
           {refining ? <Loader size={16} className="animate-spin" /> : <RefreshCw size={16} />}
           {refining ? 'Refining…' : 'Refine Trajectories'}
         </button>
-
-        <input
-          ref={importInputRef}
-          type="file"
-          accept=".json,application/json"
-          className="hidden"
-          onChange={handleImportFile}
-        />
-        <div className="grid grid-cols-2 gap-2">
-          <button
-            type="button"
-            onClick={handleSaveSettings}
-            disabled={busy}
-            className={`${panelBtnPrimary} font-semibold ${
-              busy
-                ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
-                : 'bg-gray-700 hover:bg-gray-600 text-white'
-            }`}
-          >
-            <Save size={14} />
-            Save Settings
-          </button>
-          <button
-            type="button"
-            onClick={() => { setSettingsStatus(null); importInputRef.current?.click(); }}
-            disabled={busy}
-            className={`${panelBtnPrimary} font-semibold ${
-              busy
-                ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
-                : 'bg-gray-700 hover:bg-gray-600 text-white'
-            }`}
-          >
-            <Upload size={14} />
-            Import Settings
-          </button>
-        </div>
-        {settingsStatus && (
-          <p className={`text-sm ${settingsStatus.ok ? 'text-green-400' : 'text-red-400'}`}>
-            {settingsStatus.text}
-          </p>
-        )}
 
         {busy && (
           <ProgressBar

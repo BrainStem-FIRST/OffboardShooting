@@ -1,10 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import { GeneratedTrajectory, TrajGroup, TrajGenParams } from '../types';
-import { Trash2, Download, Upload, RefreshCw, Copy, ChevronUp, ChevronDown, XCircle, X, FolderOpen, Save } from 'lucide-react';
-import { ImportFolderButton } from './ImportFolderButton';
+import { Trash2, Download, Upload, RefreshCw, Copy, ChevronUp, ChevronDown, XCircle, X, Save } from 'lucide-react';
 import {
-  simulateLanding, simulateImpactAngle, refineTrajectory, downloadTrajectoriesArchive,
-  REFINE_MAX_ITER, REFINE_THRESHOLD_M, RAW_TRAJECTORY_ERROR_TOLERANCE, resolveMagnusPower, formatMoeBounds, type TrajectoryMoe, type MoeRecalcProgress,
+  simulateLanding, simulateImpactAngle, refineTrajectory,
+  REFINE_MAX_ITER, REFINE_THRESHOLD_M, RAW_TRAJECTORY_ERROR_TOLERANCE, resolveMagnusPower, formatMoeBounds, formatSpeedMoeBounds, type TrajectoryMoe, type MoeRecalcProgress,
 } from '../simulation';
 import {
   panelAside, panelSectionTitle, panelBtnPrimary,
@@ -13,7 +12,15 @@ import {
 import { ProgressBar } from './ProgressBar';
 import { CheckboxLabel } from './Checkbox';
 import { isUnsuccessfulTrajectory } from '../utils/trajGenStatus';
-import { parseTrajGroupFromText, loadTrajGroupsFromDirectory, saveTrajGroupsToDirectory } from '../utils/trajGenIO';
+import {
+  downloadTrajGenProject,
+  parseTrajGenImport,
+  pickTrajGenProjectForOpen,
+  pickTrajGenProjectForSave,
+  saveTrajGenProjectToHandle,
+  trajGenProjectFileName,
+} from '../utils/trajGenProjectIO';
+import { downloadTrajectoryJavaFile } from '../utils/trajGenJavaIO';
 
 interface Props {
   groups: TrajGroup[];
@@ -29,10 +36,6 @@ interface Props {
   onImportGroups: (groups: TrajGroup[], mode: 'replace' | 'append') => void;
   onClearAll: () => void;
   onDeleteUnsuccessful: () => void;
-  showAll: boolean;
-  onShowAllChange: (showAll: boolean) => void;
-  showBiggestMoe: boolean;
-  onShowBiggestMoeChange: (showBiggestMoe: boolean) => void;
   params: TrajGenParams;
   onParamsChange: (params: TrajGenParams) => void;
   onRecalculateMoe: (errorTolerance: number, goalPlaneAngleDeg: number) => void;
@@ -179,7 +182,6 @@ export default function TrajectoryGenRight({
   groups, selectedGroupId, hoveredTrajId, trajMoeById, bestMoeTrajIds,
   onSelectGroup, onHoverTraj,
   onDeleteTraj, onDeleteGroup, onUpdateGroup, onImportGroups, onClearAll, onDeleteUnsuccessful,
-  showAll, onShowAllChange, showBiggestMoe, onShowBiggestMoeChange,
   params, onParamsChange, onRecalculateMoe, moeRecalculating, moeRecalcProgress, width
 }: Props) {
   const group = groups.find(g => g.id === selectedGroupId) ?? groups[0] ?? null;
@@ -199,11 +201,10 @@ export default function TrajectoryGenRight({
   const importInputRef = useRef<HTMLInputElement>(null);
   const importBusyRef = useRef(false);
   const saveBusyRef = useRef(false);
-  const trajWriteDirRef = useRef<FileSystemDirectoryHandle | null>(null);
+  const projectFileHandleRef = useRef<FileSystemFileHandle | null>(null);
   const [importing, setImporting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [importStatus, setImportStatus] = useState<{ ok: boolean | null; text: string } | null>(null);
-  const [folderImportPrompt, setFolderImportPrompt] = useState<TrajGroup[] | null>(null);
 
   useEffect(() => { activeCellRef.current = activeCell; }, [activeCell]);
   useEffect(() => { cellRawRef.current = cellRaw; }, [cellRaw]);
@@ -350,52 +351,60 @@ export default function TrajectoryGenRight({
   }
 
   function handleDownload() {
-    downloadTrajectoriesArchive(groups, params, trajMoeById);
+    try {
+      downloadTrajGenProject(params, groups, trajMoeById);
+      setImportStatus({ ok: true, text: `Downloaded ${trajGenProjectFileName(params)}.` });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setImportStatus({ ok: false, text: `Download failed: ${msg}` });
+    }
   }
 
-  function handleSaveAllClick() {
-    if (saveBusyRef.current || importBusyRef.current) return;
-    if (totalTrajectoryCount === 0) return;
+  function handleDownloadJava() {
+    try {
+      downloadTrajectoryJavaFile(params, groups, trajMoeById);
+      setImportStatus({ ok: true, text: 'Downloaded TrajectoryJsonString.java.' });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setImportStatus({ ok: false, text: `Java download failed: ${msg}` });
+    }
+  }
 
-    if (!trajWriteDirRef.current) {
+  function applyImportResult(
+    result: Extract<ReturnType<typeof parseTrajGenImport>, { ok: true }>,
+    fileLabel: string,
+    fileHandle: FileSystemFileHandle | null,
+  ) {
+    if (fileHandle) projectFileHandleRef.current = fileHandle;
+
+    if (result.type === 'project') {
+      onParamsChange(result.params);
+      onImportGroups(result.groups, 'replace');
+      const warningText = result.warnings.length > 0 ? ` ${result.warnings.join(' ')}` : '';
       setImportStatus({
-        ok: false,
-        text: 'Import a trajectory folder first — Save All writes to the folder you imported from.',
+        ok: true,
+        text: `Imported project from ${fileLabel} (${result.groups.length} group(s)).${warningText}`.trim(),
       });
       return;
     }
 
-    saveBusyRef.current = true;
-    setSaving(true);
-    setImportStatus(null);
+    if (result.type === 'settings') {
+      onParamsChange(result.params);
+      setImportStatus({
+        ok: true,
+        text: `Imported settings from ${fileLabel}. Generate trajectories to populate the project.`,
+      });
+      return;
+    }
 
-    void (async () => {
-      try {
-        const result = await saveTrajGroupsToDirectory(
-          trajWriteDirRef.current!,
-          groups,
-          params,
-          (current, total) => {
-            setImportStatus({ ok: null, text: `Saving trajectories ${current}/${total}…` });
-          },
-          trajMoeById,
-        );
-        if (!result.ok) {
-          setImportStatus({ ok: false, text: result.message });
-          return;
-        }
-        setImportStatus({
-          ok: true,
-          text: `Saved ${result.count} trajectory file(s) to imported folder (replaced existing).`,
-        });
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        setImportStatus({ ok: false, text: `Could not save trajectories: ${msg}` });
-      } finally {
-        saveBusyRef.current = false;
-        setSaving(false);
-      }
-    })();
+    if (result.optimizerParams) {
+      onParamsChange({ ...params, ...result.optimizerParams });
+    }
+    onImportGroups(result.groups, 'append');
+    setImportStatus({
+      ok: true,
+      text: `Imported trajectory group from ${fileLabel} (${result.groups.length} group added).`,
+    });
   }
 
   function handleImportFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -405,59 +414,86 @@ export default function TrajectoryGenRight({
     setImportStatus(null);
     const reader = new FileReader();
     reader.onload = (ev) => {
-      const group = parseTrajGroupFromText(ev.target?.result as string);
-      if (!group) {
-        setImportStatus({ ok: false, text: 'Invalid JSON or missing required fields (dragCoeff, magnusCoeff, dx, dy, trajectories).' });
+      const result = parseTrajGenImport(ev.target?.result as string);
+      if (!result.ok) {
+        setImportStatus({ ok: false, text: result.message });
         return;
       }
-      onImportGroups([group], 'append');
-      setImportStatus({ ok: true, text: `Imported 1 group (${group.dx.toFixed(3)}, ${group.dy.toFixed(3)}).` });
+      projectFileHandleRef.current = null;
+      applyImportResult(result, file.name, null);
     };
     reader.onerror = () => setImportStatus({ ok: false, text: 'Failed to read file.' });
     reader.readAsText(file);
   }
 
-  function applyFolderImport(groups: TrajGroup[], mode: 'replace' | 'append') {
-    onImportGroups(groups, mode);
-    setFolderImportPrompt(null);
-    setImportStatus({
-      ok: true,
-      text: mode === 'replace'
-        ? `Imported ${groups.length} group(s), replaced current trajectories. Save All will update this folder.`
-        : `Imported ${groups.length} group(s), added to current trajectories. Save All will update this folder.`,
-    });
-  }
+  async function handleImportClick() {
+    if (importBusyRef.current || saveBusyRef.current) return;
+    setImportStatus(null);
 
-  async function handleImportTrajFolder(dir: FileSystemDirectoryHandle) {
-    setImportStatus({ ok: null, text: 'Loading trajectory files…' });
-    const loadResult = await loadTrajGroupsFromDirectory(dir);
-    if (!loadResult.ok) {
-      setImportStatus({ ok: false, text: loadResult.message });
-      return;
-    }
-
-    trajWriteDirRef.current = loadResult.writeDir;
-
-    if (totalTrajectoryCount > 0) {
-      setFolderImportPrompt(loadResult.groups);
-      if (loadResult.warnings.length > 0) {
-        setImportStatus({ ok: null, text: loadResult.warnings.join(' ') });
+    if (typeof window.showOpenFilePicker === 'function') {
+      importBusyRef.current = true;
+      setImporting(true);
+      try {
+        const pick = await pickTrajGenProjectForOpen();
+        if (!pick.ok) {
+          if (!pick.cancelled && pick.message) {
+            setImportStatus({ ok: false, text: pick.message });
+          }
+          return;
+        }
+        const result = parseTrajGenImport(pick.text);
+        if (!result.ok) {
+          setImportStatus({ ok: false, text: result.message });
+          return;
+        }
+        applyImportResult(result, pick.handle.name, pick.handle);
+      } finally {
+        importBusyRef.current = false;
+        setImporting(false);
       }
       return;
     }
 
-    applyFolderImport(loadResult.groups, 'replace');
-    if (loadResult.warnings.length > 0) {
-      setImportStatus((prev) => ({
-        ok: true,
-        text: `${prev?.text ?? `Imported ${loadResult.groups.length} group(s). Save All will update this folder.`} ${loadResult.warnings.join(' ')}`.trim(),
-      }));
-    } else {
-      setImportStatus({
-        ok: true,
-        text: `Imported ${loadResult.groups.length} group(s). Save All will update this folder.`,
-      });
-    }
+    importInputRef.current?.click();
+  }
+
+  function handleSaveClick() {
+    if (saveBusyRef.current || importBusyRef.current) return;
+    if (totalTrajectoryCount === 0) return;
+
+    saveBusyRef.current = true;
+    setSaving(true);
+    setImportStatus(null);
+
+    void (async () => {
+      try {
+        let handle = projectFileHandleRef.current;
+        if (!handle) {
+          const pick = await pickTrajGenProjectForSave(trajGenProjectFileName(params));
+          if (!pick.ok) {
+            if (!pick.cancelled && pick.message) {
+              setImportStatus({ ok: false, text: pick.message });
+            }
+            return;
+          }
+          handle = pick.handle;
+          projectFileHandleRef.current = handle;
+        }
+
+        const result = await saveTrajGenProjectToHandle(handle, groups, params, trajMoeById);
+        if (!result.ok) {
+          setImportStatus({ ok: false, text: result.message });
+          return;
+        }
+        setImportStatus({ ok: true, text: `Saved project to ${handle.name}.` });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setImportStatus({ ok: false, text: `Could not save project: ${msg}` });
+      } finally {
+        saveBusyRef.current = false;
+        setSaving(false);
+      }
+    })();
   }
 
   function SortIcon({ k }: { k: SortKey }) {
@@ -478,65 +514,13 @@ export default function TrajectoryGenRight({
   return (
     <aside className={`${panelAside} border-l border-gray-700`} style={{ width }}>
 
-      {folderImportPrompt && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="bg-gray-900 border border-gray-600 rounded-lg p-4 max-w-sm w-full space-y-3 shadow-xl">
-            <h3 className="text-sm font-semibold text-white">Import trajectory folder?</h3>
-            <p className={`${panelHint} text-gray-400`}>
-              Found {folderImportPrompt.length} group{folderImportPrompt.length !== 1 ? 's' : ''} in the selected folder.
-              You already have trajectories loaded.
-            </p>
-            <div className="flex flex-col gap-2">
-              <button
-                type="button"
-                onClick={() => applyFolderImport(folderImportPrompt, 'replace')}
-                className={`w-full ${panelBtnPrimary} bg-blue-700 hover:bg-blue-600 text-white`}
-              >
-                Replace current trajectories
-              </button>
-              <button
-                type="button"
-                onClick={() => applyFolderImport(folderImportPrompt, 'append')}
-                className={`w-full ${panelBtnPrimary} bg-gray-700 hover:bg-gray-600 text-white`}
-              >
-                Add to current trajectories
-              </button>
-              <button
-                type="button"
-                onClick={() => setFolderImportPrompt(null)}
-                className={`w-full ${panelBtnPrimary} bg-gray-800 hover:bg-gray-700 text-gray-300`}
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Title + show all */}
+      {/* Title */}
       <div className="flex-shrink-0 px-4 pt-3 pb-2 border-b border-gray-700">
-        <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center justify-between">
           <h2 className={panelSectionTitle}>Trajectories</h2>
           <span className={`text-sm ${panelMono} bg-blue-900/40 text-blue-300 px-2 py-0.5 rounded-full`}>
             {totalTrajectoryCount}
           </span>
-        </div>
-        <div className="space-y-1.5">
-          <CheckboxLabel
-            checked={showAll}
-            disabled={groups.length === 0}
-            onChange={onShowAllChange}
-            label="Show all"
-            labelClassName="text-sm text-gray-400"
-          />
-          <CheckboxLabel
-            checked={showBiggestMoe}
-            disabled={groups.length === 0}
-            onChange={onShowBiggestMoeChange}
-            label="Show biggest MOE"
-            labelClassName="text-sm text-gray-400"
-            color="green"
-          />
         </div>
       </div>
 
@@ -692,7 +676,7 @@ export default function TrajectoryGenRight({
                       {traj.exitVelocity.toFixed(3)}
                       {moe && (
                         <span className={`text-xs ${isMaxMoe ? 'text-green-400' : 'text-gray-500'}`}>
-                          {' '}{formatMoeBounds(moe.speedMoeMinus, moe.speedMoePlus, 3)}
+                          {' '}{formatSpeedMoeBounds(moe)}
                         </span>
                       )}
                     </span>
@@ -828,9 +812,8 @@ export default function TrajectoryGenRight({
               </button>
             </div>
 
-            {/* Import / Export */}
+            {/* Project */}
             <div className="space-y-2">
-              <h3 className={panelSectionTitle}>Import / Export</h3>
               <input
                 ref={importInputRef}
                 type="file"
@@ -839,35 +822,27 @@ export default function TrajectoryGenRight({
                 onChange={handleImportFile}
               />
               <button
-                onClick={() => { setImportStatus(null); importInputRef.current?.click(); }}
+                type="button"
+                onClick={handleImportClick}
                 disabled={importing || saving}
                 className={`w-full ${panelBtnPrimary} bg-blue-700 hover:bg-blue-600 text-white disabled:bg-gray-800 disabled:text-gray-500 disabled:cursor-not-allowed`}
               >
                 <Upload size={14} />
-                Import Single JSON
+                {importing ? 'Importing…' : 'Import'}
               </button>
-              <ImportFolderButton
-                label="Import Folder"
-                icon={FolderOpen}
-                disabled={saving}
-                busyRef={importBusyRef}
-                onImportingChange={setImporting}
-                className={`w-full ${panelBtnPrimary} bg-blue-700 hover:bg-blue-600 text-white disabled:bg-gray-800 disabled:text-gray-500 disabled:cursor-not-allowed`}
-                unsupportedMessage="Import Folder requires Chrome or Edge. Your browser does not support folder selection."
-                onBeforeImport={() => {
-                  setImportStatus(null);
-                  return true;
-                }}
-                onBusy={() => setImportStatus({ ok: null, text: 'Import already in progress.' })}
-                onCancel={() => setImportStatus({ ok: null, text: 'Import cancelled.' })}
-                onError={(text) => setImportStatus({ ok: false, text })}
-                onFolderSelected={handleImportTrajFolder}
-              />
-              {importStatus && (
-                <p className={`text-sm ${importStatus.ok === true ? 'text-green-400' : importStatus.ok === false ? 'text-red-400' : 'text-gray-400'}`}>
-                  {importStatus.text}
-                </p>
-              )}
+              <button
+                type="button"
+                onClick={handleSaveClick}
+                disabled={totalTrajectoryCount === 0 || importing || saving}
+                className={`w-full ${panelBtnPrimary} ${
+                  totalTrajectoryCount === 0 || importing || saving
+                    ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
+                    : 'bg-blue-700 hover:bg-blue-600 text-white'
+                }`}
+              >
+                <Save size={14} />
+                {saving ? 'Saving…' : 'Save'}
+              </button>
               <button
                 type="button"
                 onClick={handleDownload}
@@ -879,21 +854,26 @@ export default function TrajectoryGenRight({
                 }`}
               >
                 <Download size={14} />
-                Download All Trajectories
+                Download
               </button>
               <button
                 type="button"
-                onClick={handleSaveAllClick}
-                disabled={totalTrajectoryCount === 0 || importing || saving}
+                onClick={handleDownloadJava}
+                disabled={totalTrajectoryCount === 0 || saving}
                 className={`w-full ${panelBtnPrimary} ${
-                  totalTrajectoryCount === 0 || importing || saving
+                  totalTrajectoryCount === 0 || saving
                     ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
-                    : 'bg-blue-700 hover:bg-blue-600 text-white'
+                    : 'bg-green-700 hover:bg-green-600 text-white'
                 }`}
               >
-                <Save size={14} />
-                {saving ? 'Saving…' : 'Save All Trajectories'}
+                <Download size={14} />
+                Download as Java file
               </button>
+              {importStatus && (
+                <p className={`text-sm ${importStatus.ok === true ? 'text-green-400' : importStatus.ok === false ? 'text-red-400' : 'text-gray-400'}`}>
+                  {importStatus.text}
+                </p>
+              )}
             </div>
           </div>
       </div>

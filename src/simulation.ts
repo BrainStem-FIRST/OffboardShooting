@@ -1,4 +1,4 @@
-import type { GeneratedTrajectory, TrajGenParams, TrajectoryPoint, TrajGroup } from './types';
+import type { GeneratedTrajectory, TrajGenParams, TrajectoryPoint, TrajGroup, TrajOptimizerParams } from './types';
 import { isPlottedPoint, plottedPoints } from './utils/trajectorySegments';
 import type { PixelsPerMeterFn } from './utils/meterstickScale';
 import { deltaSeconds, elapsedSeconds } from './utils/frameTiming';
@@ -1063,13 +1063,18 @@ export function formatMoeBounds(minus: number, plus: number, decimals: number, u
   return `−${minus.toFixed(decimals)}/+${plus.toFixed(decimals)}${unitSuffix}`;
 }
 
+/** Speed MOE display shared by list, hover tooltip, and charts. */
+export function formatSpeedMoeBounds(moe: Pick<TrajectoryMoe, 'speedMoeMinus' | 'speedMoePlus'>): string {
+  return formatMoeBounds(moe.speedMoeMinus, moe.speedMoePlus, 3);
+}
+
 const MOE_MAX_ITER = 50;
 const MOE_SPEED_MAX_DELTA = 15; // m/s
 const MOE_ANGLE_MAX_DELTA = 45; // deg
 const MOE_SPEED_WALK_STEP = 0.1; // m/s
 /** Weight below-nominal (slower) velocity margin more when ranking speed MOE. */
-const MOE_SPEED_BELOW_WEIGHT = 0.8;
-const MOE_SPEED_ABOVE_WEIGHT = 0.5;
+export const MOE_SPEED_BELOW_WEIGHT = 0.85;
+export const MOE_SPEED_ABOVE_WEIGHT = 0.15;
 
 /** Unit vectors for a goal plane tilted angleDeg from horizontal (along = along-plane, normal = ⊥). */
 export function goalPlaneBasis(angleDeg: number): {
@@ -1633,16 +1638,20 @@ export function computeTrajectoryMoe(
       goalPlaneAngleDeg,
     );
 
+  // Symmetric search span around nominal speed so +/− margins are comparable (avoid
+  // capping drop margin at nominalVel while allowing +margin searches up to 15 m/s).
+  const speedMaxDelta = Math.min(MOE_SPEED_MAX_DELTA, nominalVel);
+
   const speedMoePlus = walkAndRefineOneSidedMargin(
     (d) => inGoal(nominalVel + d, nominalAngle),
     (d) => edgeErr(nominalVel + d, nominalAngle),
-    MOE_SPEED_MAX_DELTA,
+    speedMaxDelta,
     MOE_SPEED_WALK_STEP,
   );
   const speedMoeMinus = walkAndRefineOneSidedMargin(
     (d) => nominalVel - d > 0 && inGoal(nominalVel - d, nominalAngle),
     (d) => (nominalVel - d > 0 ? edgeErr(nominalVel - d, nominalAngle) : null),
-    nominalVel,
+    speedMaxDelta,
     MOE_SPEED_WALK_STEP,
   );
   const angleMoePlus = binarySearchOneSidedMargin(
@@ -2669,18 +2678,15 @@ export function groupExportPayload(
   errorTolerance: number,
   magnusPower = 2,
   goalPlaneAngleDeg = 0,
-  optimalTrajId?: string,
+  /** Index into group.trajectories (same order as exported trajectories[]). */
+  preferredOptimalIndex?: number,
+  optimizerParams?: TrajOptimizerParams,
 ) {
   const half = errorTolerance / 2;
   const effectiveMagnusPower = resolveMagnusPower(group.magnusPower ?? magnusPower);
-  let biggestMOETrajectory = -1;
+  let optimalTrajectoryIndex = -1;
   let bestCombined = -1;
   let bestExitAngle = Infinity;
-
-  if (optimalTrajId) {
-    const idx = group.trajectories.findIndex((t) => t.id === optimalTrajId);
-    if (idx >= 0) biggestMOETrajectory = idx;
-  }
 
   const trajectories = group.trajectories.map((t, index) => {
     const moe = computeTrajectoryMoe(
@@ -2693,14 +2699,14 @@ export function groupExportPayload(
       effectiveMagnusPower,
       goalPlaneAngleDeg,
     );
-    if (optimalTrajId === undefined && moe) {
+    if (preferredOptimalIndex === undefined && moe) {
       if (
-        biggestMOETrajectory < 0 ||
+        optimalTrajectoryIndex < 0 ||
         isBetterOptimalTrajectory(moe.combinedMoe, t.exitAngle, bestCombined, bestExitAngle)
       ) {
         bestCombined = moe.combinedMoe;
         bestExitAngle = t.exitAngle;
-        biggestMOETrajectory = index;
+        optimalTrajectoryIndex = index;
       }
     }
 
@@ -2725,12 +2731,24 @@ export function groupExportPayload(
     return entry;
   });
 
+  if (preferredOptimalIndex !== undefined) {
+    optimalTrajectoryIndex = preferredOptimalIndex;
+  }
+
+  const validatedOptimalIndex =
+    Number.isInteger(optimalTrajectoryIndex) &&
+    optimalTrajectoryIndex >= 0 &&
+    optimalTrajectoryIndex < trajectories.length
+      ? optimalTrajectoryIndex
+      : undefined;
+
   return {
     dx: group.dx,
     dy: group.dy,
     dragCoeff: group.drag,
     magnusCoeff: group.magnus,
-    ...(biggestMOETrajectory >= 0 ? { biggestMOETrajectory } : {}),
+    ...(validatedOptimalIndex !== undefined ? { optimalTrajectoryIndex: validatedOptimalIndex } : {}),
+    ...(optimizerParams ? { optimizerParams } : {}),
     trajectories,
   };
 }
@@ -2741,6 +2759,16 @@ export function groupExportFileName(group: TrajGroup): string {
 
 function sanitizeArchiveName(name: string): string {
   return name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
+}
+
+export function trajOptimizerParamsFromGenParams(params: TrajGenParams): TrajOptimizerParams {
+  return {
+    optimalMoeWeight: params.optimalMoeWeight,
+    optimalSpeedDerivWeight: params.optimalSpeedDerivWeight,
+    optimalAngleDerivWeight: params.optimalAngleDerivWeight,
+    optimalSpeedSecondDerivWeight: params.optimalSpeedSecondDerivWeight,
+    optimalAngleSecondDerivWeight: params.optimalAngleSecondDerivWeight,
+  };
 }
 
 export function exportFolderName(params: TrajGenParams): string {
@@ -2763,8 +2791,9 @@ export function downloadTrajectoriesArchive(
       : new Set<string>();
 
   const folderName = exportFolderName(params);
+  const optimizerParams = trajOptimizerParamsFromGenParams(params);
   const entries = groupsWithTrajs.map((g) => {
-    const optimalTraj = g.trajectories.find((t) => optimalIds.has(t.id));
+    const optimalIndex = g.trajectories.findIndex((t) => optimalIds.has(t.id));
     return {
       name: `${folderName}/${groupExportFileName(g)}`,
       data: new TextEncoder().encode(JSON.stringify(
@@ -2773,12 +2802,22 @@ export function downloadTrajectoriesArchive(
           params.errorTolerance,
           resolveMagnusPower(params.magnusPower),
           params.goalPlaneAngleDeg,
-          optimalTraj?.id,
+          optimalIndex >= 0 ? optimalIndex : undefined,
+          optimizerParams,
         ),
         null,
         4,
       )),
     };
+  });
+
+  entries.push({
+    name: `${folderName}/optimizer_params.json`,
+    data: new TextEncoder().encode(JSON.stringify(
+      { version: 1, optimizerParams },
+      null,
+      4,
+    )),
   });
 
   const blob = buildStoreZip(entries);

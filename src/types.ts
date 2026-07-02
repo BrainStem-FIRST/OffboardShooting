@@ -89,8 +89,8 @@ export interface TrajGroup {
   /** Magnus speed exponent used when this group was generated. */
   magnusPower?: number;
   trajectories: GeneratedTrajectory[];
-  /** Index into trajectories for best combined MOE (from JSON import). */
-  biggestMOETrajectory?: number;
+  /** Index into trajectories for the optimal shot (from JSON import/export). */
+  optimalTrajectoryIndex?: number;
 }
 
 export interface TrajGenParams {
@@ -128,3 +128,21 @@ export interface TrajGenParams {
   /** Penalty weight on |d²(exit angle)/dx²| at interior goal distances. */
   optimalAngleSecondDerivWeight: number;
 }
+
+/** Weights used by global optimal trajectory path selection (saved in trajectory JSON). */
+export type TrajOptimizerParams = Pick<
+  TrajGenParams,
+  | 'optimalMoeWeight'
+  | 'optimalSpeedDerivWeight'
+  | 'optimalAngleDerivWeight'
+  | 'optimalSpeedSecondDerivWeight'
+  | 'optimalAngleSecondDerivWeight'
+>;
+
+export const DEFAULT_TRAJ_OPTIMIZER_PARAMS: TrajOptimizerParams = {
+  optimalMoeWeight: 1,
+  optimalSpeedDerivWeight: 0.15,
+  optimalAngleDerivWeight: 0.03,
+  optimalSpeedSecondDerivWeight: 0.01,
+  optimalAngleSecondDerivWeight: 0.01,
+};

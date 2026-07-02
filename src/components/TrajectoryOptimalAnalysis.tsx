@@ -3,10 +3,13 @@ import { TrajGenParams, TrajGroup } from '../types';
 import {
   buildOptimalSequencePoints,
   computeSequenceDerivatives,
+  formatMoeBounds,
+  formatSpeedMoeBounds,
   type TrajectoryMoe,
 } from '../simulation';
 import DualAxisDistanceChart, {
   DUAL_AXIS_LEFT_COLOR,
+  DUAL_AXIS_LEFT_EXTRA_COLOR,
   DUAL_AXIS_RIGHT_COLOR,
   type DualAxisPoint,
 } from './DualAxisDistanceChart';
@@ -37,7 +40,12 @@ function buildMoePoints(
     if (!best) continue;
     const moe = trajMoeById.get(best.id);
     if (!moe) continue;
-    points.push({ dx: g.dx, left: moe.speedMoe, right: moe.angleMoe });
+    points.push({
+      dx: g.dx,
+      left: moe.speedMoeMinus,
+      leftExtra: moe.speedMoePlus,
+      right: Math.min(moe.angleMoeMinus, moe.angleMoePlus),
+    });
   }
   points.sort((a, b) => a.dx - b.dx);
   return points;
@@ -169,40 +177,8 @@ export default function TrajectoryOptimalAnalysis({
         </div>
       </div>
 
-      <div className="flex flex-col lg:flex-row">
-        <div className={`flex-1 min-w-0 flex flex-col border-b lg:border-b-0 lg:border-r border-gray-800 ${CHART_PANEL_MIN_H}`}>
-          <div className="flex-shrink-0 px-4 pt-2 text-xs font-medium text-gray-400">MOE vs distance</div>
-          <div className="h-[32rem]">
-            <DualAxisDistanceChart
-              points={moePoints}
-              yAxisFromZero
-              leftLegend="Exit speed MOE (m/s)"
-              rightLegend="Exit angle MOE (°)"
-              leftAxisTitle="Speed MOE (m/s)"
-              rightAxisTitle="Angle MOE (°)"
-              emptyMessage="No optimal trajectories with MOE data."
-              renderTooltip={(p) => (
-                <>
-                  <div className="text-gray-400 text-center mb-1">dx = {p.dx.toFixed(2)} m</div>
-                  <div className="text-gray-300">
-                    Speed MOE{' '}
-                    <span className="font-mono" style={{ color: DUAL_AXIS_LEFT_COLOR }}>
-                      {p.left.toFixed(3)} m/s
-                    </span>
-                  </div>
-                  <div className="text-gray-300">
-                    Angle MOE{' '}
-                    <span className="font-mono" style={{ color: DUAL_AXIS_RIGHT_COLOR }}>
-                      {p.right.toFixed(2)}°
-                    </span>
-                  </div>
-                </>
-              )}
-            />
-          </div>
-        </div>
-
-        <div className={`flex-1 min-w-0 flex flex-col ${CHART_PANEL_MIN_H}`}>
+      <div className="flex flex-col">
+        <div className={`flex-1 min-w-0 flex flex-col border-b border-gray-800 ${CHART_PANEL_MIN_H}`}>
           <div className="flex-shrink-0 px-4 pt-2 space-y-1.5">
             <div className="text-xs font-medium text-gray-400">Exit speed &amp; angle vs distance</div>
             <div className="flex flex-wrap gap-x-4 gap-y-1">
@@ -276,6 +252,40 @@ export default function TrajectoryOptimalAnalysis({
                 )}
               />
             )}
+          </div>
+        </div>
+
+        <div className={`flex-1 min-w-0 flex flex-col ${CHART_PANEL_MIN_H}`}>
+          <div className="flex-shrink-0 px-4 pt-2 text-xs font-medium text-gray-400">MOE vs distance</div>
+          <div className="h-[32rem]">
+            <DualAxisDistanceChart
+              points={moePoints}
+              yAxisFromZero
+              leftLegend="Speed MOE − (m/s)"
+              leftExtraLegend="Speed MOE + (m/s)"
+              leftExtraColor={DUAL_AXIS_LEFT_EXTRA_COLOR}
+              rightLegend="Exit angle MOE min (°)"
+              leftAxisTitle="Speed MOE (m/s)"
+              rightAxisTitle="Angle MOE (°)"
+              emptyMessage="No optimal trajectories with MOE data."
+              renderTooltip={(p) => (
+                <>
+                  <div className="text-gray-400 text-center mb-1">dx = {p.dx.toFixed(2)} m</div>
+                  <div className="text-gray-300">
+                    Speed MOE{' '}
+                    <span className="font-mono" style={{ color: DUAL_AXIS_LEFT_COLOR }}>
+                      {formatSpeedMoeBounds({ speedMoeMinus: p.left, speedMoePlus: p.leftExtra ?? p.left })}
+                    </span>
+                  </div>
+                  <div className="text-gray-300">
+                    Angle MOE (min){' '}
+                    <span className="font-mono" style={{ color: DUAL_AXIS_RIGHT_COLOR }}>
+                      {p.right.toFixed(2)}°
+                    </span>
+                  </div>
+                </>
+              )}
+            />
           </div>
         </div>
       </div>

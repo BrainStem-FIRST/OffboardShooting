@@ -1,4 +1,5 @@
 import type { TrajGenParams } from '../types';
+import { DEFAULT_TRAJ_OPTIMIZER_PARAMS } from '../types';
 
 const PARAM_KEYS: (keyof TrajGenParams)[] = [
   'dx',
@@ -51,12 +52,21 @@ function normalizeTrajGenParams(record: Record<string, unknown>): TrajGenParams 
     ...params,
     goalPlaneAngleDeg: typeof params.goalPlaneAngleDeg === 'number' ? params.goalPlaneAngleDeg : 0,
     showGoalPlanes: typeof params.showGoalPlanes === 'boolean' ? params.showGoalPlanes : false,
-    optimalMoeWeight: typeof params.optimalMoeWeight === 'number' ? params.optimalMoeWeight : 1,
-    optimalSpeedDerivWeight: typeof params.optimalSpeedDerivWeight === 'number' ? params.optimalSpeedDerivWeight : 0.3,
-    optimalAngleDerivWeight: typeof params.optimalAngleDerivWeight === 'number' ? params.optimalAngleDerivWeight : 0.3,
-    optimalSpeedSecondDerivWeight: typeof params.optimalSpeedSecondDerivWeight === 'number' ? params.optimalSpeedSecondDerivWeight : 0.1,
-    optimalAngleSecondDerivWeight: typeof params.optimalAngleSecondDerivWeight === 'number' ? params.optimalAngleSecondDerivWeight : 0.1,
+    ...DEFAULT_TRAJ_OPTIMIZER_PARAMS,
+    ...(typeof params.optimalMoeWeight === 'number' ? { optimalMoeWeight: params.optimalMoeWeight } : {}),
+    ...(typeof params.optimalSpeedDerivWeight === 'number' ? { optimalSpeedDerivWeight: params.optimalSpeedDerivWeight } : {}),
+    ...(typeof params.optimalAngleDerivWeight === 'number' ? { optimalAngleDerivWeight: params.optimalAngleDerivWeight } : {}),
+    ...(typeof params.optimalSpeedSecondDerivWeight === 'number' ? { optimalSpeedSecondDerivWeight: params.optimalSpeedSecondDerivWeight } : {}),
+    ...(typeof params.optimalAngleSecondDerivWeight === 'number' ? { optimalAngleSecondDerivWeight: params.optimalAngleSecondDerivWeight } : {}),
   };
+}
+
+export function normalizeTrajGenParamsValue(value: unknown): TrajGenParams | null {
+  if (!value || typeof value !== 'object') return null;
+  if (isTrajGenParams(value)) {
+    return normalizeTrajGenParams(value as Record<string, unknown>);
+  }
+  return null;
 }
 
 export interface TrajGenSettingsFile {
@@ -69,17 +79,19 @@ export function trajGenSettingsPayload(params: TrajGenParams): TrajGenSettingsFi
   return { version: 1, kind: 'trajGenSettings', params };
 }
 
+export function parseTrajGenParamsValue(value: unknown): TrajGenParams | null {
+  return normalizeTrajGenParamsValue(value);
+}
+
 export function parseTrajGenSettings(text: string): TrajGenParams | null {
   try {
     const json = JSON.parse(text) as unknown;
     if (json && typeof json === 'object') {
       const record = json as Record<string, unknown>;
-      if (record.kind === 'trajGenSettings' && isTrajGenParams(record.params)) {
-        return normalizeTrajGenParams(record.params as Record<string, unknown>);
+      if (record.kind === 'trajGenSettings') {
+        return parseTrajGenParamsValue(record.params);
       }
-      if (isTrajGenParams(json)) {
-        return normalizeTrajGenParams(json as Record<string, unknown>);
-      }
+      return parseTrajGenParamsValue(json);
     }
     return null;
   } catch {
@@ -87,6 +99,7 @@ export function parseTrajGenSettings(text: string): TrajGenParams | null {
   }
 }
 
+/** @deprecated Use trajGenProjectIO.downloadTrajGenProject instead. */
 export function downloadTrajGenSettings(params: TrajGenParams): void {
   const text = JSON.stringify(trajGenSettingsPayload(params), null, 2);
   const blob = new Blob([text], { type: 'application/json;charset=utf-8' });

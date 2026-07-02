@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { TrajGenParams, TrajGroup } from '../types';
 import type { TrajectoryMoe } from '../simulation';
 import { panelTab } from './panelStyles';
+import { CheckboxLabel } from './Checkbox';
 import TrajectoryGenCanvas from './TrajectoryGenCanvas';
 import TrajectoryOptimalAnalysis from './TrajectoryOptimalAnalysis';
 
@@ -13,7 +14,9 @@ interface Props {
   selectedGroupId: string | null;
   hoveredId: string | null;
   showAll: boolean;
-  showBiggestMoe: boolean;
+  onShowAllChange: (showAll: boolean) => void;
+  showOptimalTrajectories: boolean;
+  onShowOptimalTrajectoriesChange: (show: boolean) => void;
   trajMoeById: Map<string, TrajectoryMoe>;
   bestMoeTrajIds: Set<string>;
   onHoverTraj: (id: string | null) => void;
@@ -31,7 +34,9 @@ export default function TrajectoryGenCenter({
   selectedGroupId,
   hoveredId,
   showAll,
-  showBiggestMoe,
+  onShowAllChange,
+  showOptimalTrajectories,
+  onShowOptimalTrajectoriesChange,
   trajMoeById,
   bestMoeTrajIds,
   onHoverTraj,
@@ -53,28 +58,51 @@ export default function TrajectoryGenCenter({
           </button>
         ))}
       </div>
-      <div className="flex-1 min-h-0 min-w-0 relative">
+      <div className="flex-1 min-h-0 min-w-0 relative flex flex-col">
         {centerTab === 'visualizer' && (
-          <TrajectoryGenCanvas
-            params={params}
-            groups={groups}
-            selectedGroupId={selectedGroupId}
-            hoveredId={hoveredId}
-            showAll={showAll}
-            showBiggestMoe={showBiggestMoe}
-            trajMoeById={trajMoeById}
-            bestMoeTrajIds={bestMoeTrajIds}
-            onHoverTraj={onHoverTraj}
-          />
+          <>
+            <div className="flex-shrink-0 flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2 border-b border-gray-800 bg-gray-900/30">
+              <CheckboxLabel
+                checked={showAll}
+                disabled={groups.length === 0}
+                onChange={onShowAllChange}
+                label="Show all"
+                labelClassName="text-sm text-gray-400"
+              />
+              <CheckboxLabel
+                checked={showOptimalTrajectories}
+                disabled={groups.length === 0}
+                onChange={onShowOptimalTrajectoriesChange}
+                label="Show optimal trajectories"
+                labelClassName="text-sm text-gray-400"
+                color="green"
+              />
+            </div>
+            <div className="flex-1 min-h-0 min-w-0 relative">
+              <TrajectoryGenCanvas
+                params={params}
+                groups={groups}
+                selectedGroupId={selectedGroupId}
+                hoveredId={hoveredId}
+                showAll={showAll}
+                showOptimalTrajectories={showOptimalTrajectories}
+                trajMoeById={trajMoeById}
+                bestMoeTrajIds={bestMoeTrajIds}
+                onHoverTraj={onHoverTraj}
+              />
+            </div>
+          </>
         )}
         {centerTab === 'optimalAnalysis' && (
-          <TrajectoryOptimalAnalysis
-            groups={groups}
-            params={params}
-            trajMoeById={trajMoeById}
-            bestMoeTrajIds={bestMoeTrajIds}
-            onParamsChange={onParamsChange}
-          />
+          <div className="flex-1 min-h-0 min-w-0 relative">
+            <TrajectoryOptimalAnalysis
+              groups={groups}
+              params={params}
+              trajMoeById={trajMoeById}
+              bestMoeTrajIds={bestMoeTrajIds}
+              onParamsChange={onParamsChange}
+            />
+          </div>
         )}
       </div>
     </main>
