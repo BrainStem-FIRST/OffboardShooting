@@ -62,7 +62,7 @@ function SliderRow({ label, unit, value, min, max, step, disabled, onChange }: S
   }, [value, focused]);
 
   function commit(str: string) {
-    const stripped = str.replace(/[^0-9.\-]/g, '');
+    const stripped = str.replace(/[^0-9.-]/g, '');
     let n = parseFloat(stripped);
     if (isNaN(n)) n = min;
     n = Math.max(min, Math.min(max, n));
@@ -132,7 +132,7 @@ function FitParamRow({
   }, [max, focusedMax]);
 
   function commitMin(str: string) {
-    let n = parseFloat(str.replace(/[^0-9.\-]/g, ''));
+    let n = parseFloat(str.replace(/[^0-9.-]/g, ''));
     if (isNaN(n)) n = min;
     let lo = n;
     let hi = max;
@@ -143,7 +143,7 @@ function FitParamRow({
   }
 
   function commitMax(str: string) {
-    let n = parseFloat(str.replace(/[^0-9.\-]/g, ''));
+    let n = parseFloat(str.replace(/[^0-9.-]/g, ''));
     if (isNaN(n)) n = max;
     let lo = min;
     let hi = n;
@@ -285,7 +285,7 @@ export default function SimulationControls({
     if (activeTrajectoryId === null) return;
     fitRangesTouchedRef.current = { velocity: false, angle: false };
     setFitRanges(defaultFitRanges(launchParams.exitVelocity, launchParams.exitAngle));
-  }, [activeTrajectoryId]);
+  }, [activeTrajectoryId, launchParams.exitVelocity, launchParams.exitAngle]);
 
   useEffect(() => {
     if (activeTrajectoryId === null) return;

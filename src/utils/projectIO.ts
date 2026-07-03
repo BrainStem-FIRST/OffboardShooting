@@ -112,7 +112,11 @@ export function formatImportFailureMessage(scan: ImportScanDiagnostics): string 
 }
 
 function sanitizeFileName(name: string): string {
-  return name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
+  return name
+    .replace(/[<>:"/\\|?*]/g, '_')
+    .split('')
+    .map((char) => (char.charCodeAt(0) < 32 ? '_' : char))
+    .join('');
 }
 
 /** Prefer calling showDirectoryPicker synchronously from a click handler (user activation). */

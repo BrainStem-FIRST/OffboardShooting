@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { TrajGenParams, TrajGroup, GeneratedTrajectory } from '../types';
-import { simulateShot, SIM_MAX_TIME, SIM_DT, enumerateDxValues, resolveMagnusPower, goalPlaneSegment, formatMoeBounds, formatSpeedMoeBounds, type TrajectoryMoe } from '../simulation';
+import { simulateShot, SIM_MAX_TIME, SIM_DT, enumerateDxValues, resolveMagnusPower, goalPlaneSegment, formatMoeBounds, formatSpeedMoeBounds, lowestSpeedTrajectoryForGroup, type SimPoint, type TrajectoryMoe } from '../simulation';
 
 interface Props {
   params: TrajGenParams;
@@ -8,7 +8,9 @@ interface Props {
   selectedGroupId: string | null;
   hoveredId: string | null;
   showAll: boolean;
+  showAllOptimalTrajectories: boolean;
   showOptimalTrajectories: boolean;
+  showLowestSpeedTrajectories: boolean;
   trajMoeById: Map<string, TrajectoryMoe>;
   bestMoeTrajIds: Set<string>;
   optimalLowArcTrajIds: Set<string>;
@@ -66,6 +68,11 @@ interface OptimalContextDialog {
   alreadyArc: OptimalArc | null;
 }
 
+interface SimCacheEntry {
+  key: string;
+  points: SimPoint[];
+}
+
 function distToSegment(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
   const dx = x2 - x1;
   const dy = y2 - y1;
@@ -92,8 +99,40 @@ function hitTestPolylines(polylines: HitPolyline[], mx: number, my: number): Hit
   return best;
 }
 
+function trajectorySimCacheKey(
+  traj: GeneratedTrajectory,
+  drag: number,
+  magnus: number,
+  magnusPower: number,
+  dx: number,
+): string {
+  return [
+    traj.id,
+    traj.exitVelocity,
+    traj.exitAngle,
+    drag,
+    magnus,
+    magnusPower,
+    dx,
+    SIM_MAX_TIME,
+    SIM_DT,
+  ].join('|');
+}
+
+function zoomDecimationStride(screenWidthMeters: number): number {
+  return Math.max(1, Math.floor((screenWidthMeters - 4) / 2) + 1);
+}
+
+function showAllDecimationStride(showAll: boolean, groups: TrajGroup[], visibleCount: number): number {
+  if (!showAll || groups.length === 0 || visibleCount === 0) return 1;
+  const total = groups.reduce((sum, group) => sum + group.trajectories.length, 0);
+  const averagePerDistance = total / groups.length;
+  if (averagePerDistance <= 0) return 1;
+  return Math.max(1, Math.round(Math.pow(visibleCount / averagePerDistance, 1 / 3)));
+}
+
 export default function TrajectoryGenCanvas({
-  params, groups, selectedGroupId, hoveredId, showAll, showOptimalTrajectories,
+  params, groups, selectedGroupId, hoveredId, showAll, showAllOptimalTrajectories, showOptimalTrajectories, showLowestSpeedTrajectories,
   trajMoeById, bestMoeTrajIds, optimalLowArcTrajIds, optimalHighArcTrajIds, onHoverTraj, onSetManualOptimalTrajectory,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -101,8 +140,17 @@ export default function TrajectoryGenCanvas({
   const viewRef = useRef<View>({ panX: -1, panY: -2, zoom: INIT_ZOOM });
   const draggingRef = useRef<{ lastX: number; lastY: number } | null>(null);
   const hitPolylinesRef = useRef<HitPolyline[]>([]);
+  const simCacheRef = useRef<Map<string, SimCacheEntry>>(new Map());
   const [tooltip, setTooltip] = useState<CanvasTooltip | null>(null);
   const [optimalDialog, setOptimalDialog] = useState<OptimalContextDialog | null>(null);
+
+  useEffect(() => {
+    const validIds = new Set(groups.flatMap((group) => group.trajectories.map((traj) => traj.id)));
+    const cache = simCacheRef.current;
+    for (const [id] of cache) {
+      if (!validIds.has(id)) cache.delete(id);
+    }
+  }, [groups]);
 
   function worldToCanvas(wx: number, wy: number, view: View, cssH: number): [number, number] {
     const sx = (wx - view.panX) * view.zoom;
@@ -113,8 +161,9 @@ export default function TrajectoryGenCanvas({
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    const maybeCtx = canvas.getContext('2d');
+    if (!maybeCtx) return;
+    const ctx = maybeCtx;
 
     const dpr = window.devicePixelRatio || 1;
     const cssW = canvas.clientWidth;
@@ -260,9 +309,10 @@ export default function TrajectoryGenCanvas({
     }
 
     const activeMagnusPower = resolveMagnusPower(params.magnusPower);
+    const screenWidthMeters = cssW / view.zoom;
 
     type TrajDrawEntry = { traj: GeneratedTrajectory; groupId: string; drag: number; magnus: number; dx: number; dy: number };
-    const trajEntries: TrajDrawEntry[] = showOptimalTrajectories
+    const trajEntries: TrajDrawEntry[] = showAllOptimalTrajectories
       ? groups.flatMap((g) => {
           return g.trajectories
             .filter((t) => bestMoeTrajIds.has(t.id))
@@ -278,27 +328,23 @@ export default function TrajectoryGenCanvas({
           dx: selectedGroup!.dx,
           dy: selectedGroup!.dy,
         }));
+    const renderStride =
+      zoomDecimationStride(screenWidthMeters) *
+      showAllDecimationStride(showAll, groups, trajEntries.length);
 
     const polylines: HitPolyline[] = [];
     const lowestSpeedTrajIds = new Set<string>();
-    const visibleGroups = showOptimalTrajectories || showAll
+    const visibleGroups = showAllOptimalTrajectories || showAll
       ? groups
       : selectedGroup
       ? [selectedGroup]
       : [];
     for (const g of visibleGroups) {
-      let lowest: GeneratedTrajectory | null = null;
-      for (const traj of g.trajectories) {
-        if (
-          lowest === null ||
-          traj.exitVelocity < lowest.exitVelocity - 1e-12 ||
-          (Math.abs(traj.exitVelocity - lowest.exitVelocity) <= 1e-12 && traj.exitAngle < lowest.exitAngle)
-        ) {
-          lowest = traj;
-        }
-      }
-      if (lowest) lowestSpeedTrajIds.add(lowest.id);
+      const lowest = lowestSpeedTrajectoryForGroup(g);
+      if (lowest && showLowestSpeedTrajectories) lowestSpeedTrajIds.add(lowest.id);
     }
+    const highlightedOptimalTrajIds =
+      showAllOptimalTrajectories || showOptimalTrajectories ? bestMoeTrajIds : new Set<string>();
 
     function drawTraj(
       traj: GeneratedTrajectory,
@@ -310,16 +356,28 @@ export default function TrajectoryGenCanvas({
       strokeStyle: string,
       lineWidth: number
     ) {
-      const simPts = simulateShot(traj.exitVelocity, traj.exitAngle, drag, magnus, SIM_MAX_TIME, SIM_DT, activeMagnusPower);
+      const stopX = Math.min(dx, worldXMax + 1);
+      const cacheKey = trajectorySimCacheKey(traj, drag, magnus, activeMagnusPower, dx);
+      const cached = simCacheRef.current.get(traj.id);
+      const simPts = cached?.key === cacheKey
+        ? cached.points
+        : simulateShot(traj.exitVelocity, traj.exitAngle, drag, magnus, SIM_MAX_TIME, SIM_DT, activeMagnusPower, dx);
+      if (cached?.key !== cacheKey) {
+        simCacheRef.current.set(traj.id, { key: cacheKey, points: simPts });
+      }
       const screenPts: [number, number][] = [];
       ctx.beginPath();
       let started = false;
-      for (const p of simPts) {
+      for (let i = 0; i < simPts.length; i++) {
+        const p = simPts[i];
+        const shouldDrawPoint = i === 0 || i === simPts.length - 1 || i % renderStride === 0 || p.x >= stopX;
         const [sx, sy] = toS(p.x, p.y);
-        screenPts.push([sx, sy]);
-        if (!started) { ctx.moveTo(sx, sy); started = true; }
-        else ctx.lineTo(sx, sy);
-        if (p.x > worldXMax + 1) break;
+        if (shouldDrawPoint) {
+          screenPts.push([sx, sy]);
+          if (!started) { ctx.moveTo(sx, sy); started = true; }
+          else ctx.lineTo(sx, sy);
+        }
+        if (p.x >= stopX) break;
       }
       ctx.strokeStyle = strokeStyle;
       ctx.lineWidth = lineWidth;
@@ -334,12 +392,12 @@ export default function TrajectoryGenCanvas({
     }
 
     for (const { traj, groupId, drag, magnus, dx, dy } of trajEntries) {
-      if (traj.id === hoveredId || bestMoeTrajIds.has(traj.id) || lowestSpeedTrajIds.has(traj.id)) continue;
+      if (traj.id === hoveredId || highlightedOptimalTrajIds.has(traj.id) || lowestSpeedTrajIds.has(traj.id)) continue;
       drawTraj(traj, groupId, drag, magnus, dx, dy, TRAJ_COLOR, 1);
     }
 
     for (const { traj, groupId, drag, magnus, dx, dy } of trajEntries) {
-      if (bestMoeTrajIds.has(traj.id) && traj.id !== hoveredId && !lowestSpeedTrajIds.has(traj.id)) {
+      if (highlightedOptimalTrajIds.has(traj.id) && traj.id !== hoveredId && !lowestSpeedTrajIds.has(traj.id)) {
         drawTraj(traj, groupId, drag, magnus, dx, dy, TRAJ_MAX_MOE_COLOR, 2);
       }
     }
@@ -371,7 +429,7 @@ export default function TrajectoryGenCanvas({
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     ctx.fillText('exit position', rdx, rdy + 8);
-  }, [params, groups, selectedGroupId, hoveredId, showAll, showOptimalTrajectories, bestMoeTrajIds]);
+  }, [params, groups, selectedGroupId, hoveredId, showAll, showAllOptimalTrajectories, showOptimalTrajectories, showLowestSpeedTrajectories, bestMoeTrajIds]);
 
   useEffect(() => { draw(); }, [draw]);
 
@@ -499,17 +557,9 @@ export default function TrajectoryGenCanvas({
       : null;
     const group = groups.find((g) => g.id === hit.groupId);
     let arc: OptimalArc = 'low';
-    if (group?.trajectories.length) {
-      let lowest = group.trajectories[0];
-      for (const traj of group.trajectories) {
-        if (
-          traj.exitVelocity < lowest.exitVelocity - 1e-12 ||
-          (Math.abs(traj.exitVelocity - lowest.exitVelocity) <= 1e-12 && traj.exitAngle < lowest.exitAngle)
-        ) {
-          lowest = traj;
-        }
-      }
-      arc = hit.traj.exitAngle > lowest.exitAngle ? 'high' : 'low';
+    if (group) {
+      const lowest = lowestSpeedTrajectoryForGroup(group);
+      if (lowest) arc = hit.traj.exitAngle > lowest.exitAngle ? 'high' : 'low';
     }
     setTooltip(null);
     setOptimalDialog({

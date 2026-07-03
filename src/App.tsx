@@ -5,6 +5,7 @@ import SysIdSidebar from './components/SysIdSidebar';
 import VideoDisplay from './components/VideoDisplay';
 import SimulationControls from './components/SimulationControls';
 import XdirUploadDialog from './components/XdirUploadDialog';
+import { ImportFolderButton } from './components/ImportFolderButton';
 import TrajectoryGenCenter from './components/TrajectoryGenCenter';
 import TrajectoryGenLeft from './components/TrajectoryGenLeft';
 import TrajectoryGenRight from './components/TrajectoryGenRight';
@@ -15,6 +16,7 @@ import type { ImportedProjectEntry } from './utils/projectIO';
 import { MeterstickScale, defaultMeterstickPoints, scaleToPpmFn, horizontalizeMeterstickPoints, meterstickFromPoints, adjustSegmentMetersForPointChange, normalizeSegmentMeters, defaultSegmentMeters } from './utils/meterstickScale';
 import { extractFrameTimestamps } from './utils/extractFrameTimestamps';
 import { applyExtractedFrameTiming } from './utils/frameTiming';
+import { loadProjectFromDir } from './utils/projectIO';
 
 const LEFT_MIN = 160;
 const LEFT_MAX = 480;
@@ -150,7 +152,7 @@ function ResizeHandle({ onMouseDown }: { onMouseDown: (e: React.MouseEvent) => v
 }
 
 export default function App() {
-  const [tab, setTab] = useState<Tab>('trajgen');
+  const [tab, setTab] = useState<Tab>('sysid');
   const [pendingUploadFiles, setPendingUploadFiles] = useState<File[] | null>(null);
 
   // System ID state
@@ -184,7 +186,9 @@ export default function App() {
   const [genProgress, setGenProgress] = useState<TrajGenProgress | null>(null);
   const [hoveredTrajId, setHoveredTrajId] = useState<string | null>(null);
   const [showAllTrajGenTrajectories, setShowAllTrajGenTrajectories] = useState(false);
-  const [showOptimalTrajectoriesTrajGen, setShowOptimalTrajectoriesTrajGen] = useState(false);
+  const [showAllOptimalTrajectoriesTrajGen, setShowAllOptimalTrajectoriesTrajGen] = useState(false);
+  const [showOptimalTrajectoriesTrajGen, setShowOptimalTrajectoriesTrajGen] = useState(true);
+  const [showLowestSpeedTrajectoriesTrajGen, setShowLowestSpeedTrajectoriesTrajGen] = useState(true);
   const [trajMoeById, setTrajMoeById] = useState<Map<string, TrajectoryMoe>>(() => new Map());
   const [moeRecalculating, setMoeRecalculating] = useState(false);
   const [moeRecalcProgress, setMoeRecalcProgress] = useState<MoeRecalcProgress | null>(null);
@@ -261,11 +265,11 @@ export default function App() {
 
   const handleShowAllTrajGenChange = useCallback((checked: boolean) => {
     setShowAllTrajGenTrajectories(checked);
-    if (checked) setShowOptimalTrajectoriesTrajGen(false);
+    if (checked) setShowAllOptimalTrajectoriesTrajGen(false);
   }, []);
 
-  const handleShowOptimalTrajectoriesTrajGenChange = useCallback((checked: boolean) => {
-    setShowOptimalTrajectoriesTrajGen(checked);
+  const handleShowAllOptimalTrajectoriesTrajGenChange = useCallback((checked: boolean) => {
+    setShowAllOptimalTrajectoriesTrajGen(checked);
     if (checked) setShowAllTrajGenTrajectories(false);
   }, []);
 
@@ -275,9 +279,16 @@ export default function App() {
       ...g,
       optimalLowArcTrajectoryIndex: undefined,
       optimalHighArcTrajectoryIndex: undefined,
-      trajectories: g.trajectories.map(
-        ({ speedMoe, angleMoe, speedMoeMinus, speedMoePlus, angleMoeMinus, angleMoePlus, ...t }) => t,
-      ),
+      trajectories: g.trajectories.map((t) => {
+        const cleanedTraj = { ...t };
+        delete cleanedTraj.speedMoe;
+        delete cleanedTraj.angleMoe;
+        delete cleanedTraj.speedMoeMinus;
+        delete cleanedTraj.speedMoePlus;
+        delete cleanedTraj.angleMoeMinus;
+        delete cleanedTraj.angleMoePlus;
+        return cleanedTraj;
+      }),
     }));
     setTrajGroups(cleaned);
     setMoeRecalculating(true);
@@ -290,13 +301,13 @@ export default function App() {
       setMoeRecalcProgress,
       undefined,
       trajGenParams.magnusPower ?? 2,
-      trajGenParams.goalPlaneAngleDeg,
+      goalPlaneAngleDeg,
     ).then((map) => {
       setTrajMoeById(map);
       setMoeRecalculating(false);
       setMoeRecalcProgress(null);
     });
-  }, []);
+  }, [trajGenParams.magnusPower]);
 
   // Panel sizing
   const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT);
@@ -336,6 +347,7 @@ export default function App() {
 
   const selectedVideo = videos.find((v) => v.id === selectedId) ?? null;
   const selectedGroup = trajGroups.find(g => g.id === selectedGroupId) ?? trajGroups[0] ?? null;
+  const showSysIdSidePanels = videos.length > 0;
 
   const optimalTrajPaths = useMemo(() => {
     if (trajGroups.length === 0 || trajMoeById.size === 0) {
@@ -346,7 +358,7 @@ export default function App() {
       trajMoeById,
       optimalPickWeightsFromParams(trajGenParams),
     );
-  }, [trajGroups, trajMoeById, trajGenParams.optimalMoeWeight, trajGenParams.optimalSpeedDerivWeight, trajGenParams.optimalAngleDerivWeight, trajGenParams.optimalSpeedSecondDerivWeight, trajGenParams.optimalAngleSecondDerivWeight, trajGenParams.optimalVelocityBufferLineX1, trajGenParams.optimalVelocityBufferLineY1, trajGenParams.optimalVelocityBufferLineX2, trajGenParams.optimalVelocityBufferLineY2]);
+  }, [trajGroups, trajMoeById, trajGenParams]);
   const visibleOptimalTrajPaths = useMemo(
     () => effectiveOptimalIdsFromGroups(trajGroups, optimalTrajPaths),
     [trajGroups, optimalTrajPaths],
@@ -470,7 +482,6 @@ export default function App() {
       if (!selectedId) return;
       updateVideo(selectedId, { trajectory: points });
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [selectedId]
   );
 
@@ -564,13 +575,21 @@ export default function App() {
     setSelectedId(firstVideo?.id ?? null);
   }, []);
 
+  const handleImportProjectFolder = useCallback(async (dir: FileSystemDirectoryHandle) => {
+    const result = await loadProjectFromDir(dir);
+    if (!result.ok) {
+      window.alert(result.message);
+      return;
+    }
+    await handleImportProject(result.entries);
+  }, [handleImportProject]);
+
   const handleStepFrame = useCallback(
     (delta: number) => {
       if (!selectedId) return;
       const next = Math.min(totalFramesRef.current - 1, Math.max(0, currentFrameRef.current + delta));
       updateVideo(selectedId, { currentFrame: next });
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [selectedId]
   );
 
@@ -613,7 +632,6 @@ export default function App() {
         meterstick: meterstickFromPoints(flat, segmentMeters),
       });
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [selectedId, selectedVideo]
   );
 
@@ -627,7 +645,6 @@ export default function App() {
         meterstick: meterstickFromPoints(flat, normalized),
       });
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [selectedId, selectedVideo]
   );
 
@@ -642,7 +659,6 @@ export default function App() {
         meterstick: meterstickFromPoints(flat, segmentMeters),
       });
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [selectedId]
   );
 
@@ -651,7 +667,6 @@ export default function App() {
       if (!selectedId) return;
       updateVideo(selectedId, { currentFrame: frame });
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [selectedId]
   );
 
@@ -687,7 +702,6 @@ export default function App() {
       if (!selectedId) return;
       updateVideo(selectedId, { framerate });
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [selectedId]
   );
 
@@ -696,7 +710,6 @@ export default function App() {
       if (!selectedId) return;
       updateVideo(selectedId, { empiricalNumPoints });
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [selectedId]
   );
 
@@ -835,7 +848,7 @@ export default function App() {
           </h1>
           {/* Tabs */}
           <div className="flex items-end gap-1">
-            {(['trajgen', 'sysid'] as Tab[]).map((t) => (
+            {(['sysid', 'trajgen'] as Tab[]).map((t) => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
@@ -858,6 +871,8 @@ export default function App() {
         {tab === 'sysid' ? (
           <>
             {/* ── LEFT PANEL ── */}
+            {showSysIdSidePanels && (
+              <>
             <div
               className={`flex-shrink-0 h-full overflow-hidden ${isDragging ? '' : 'transition-[width] duration-200'}`}
               style={{ width: leftOpen ? leftWidth : 0 }}
@@ -882,7 +897,6 @@ export default function App() {
                 onShowTrajectoryPointsChange={setShowTrajectoryPoints}
                 focusedTrajectoryId={focusedTrajectoryId}
                 onFocusedTrajectoryChange={setFocusedTrajectoryId}
-                onTrajectoryUpdate={(points) => { pushUndo(selectedVideo?.trajectory ?? []); handleTrajectoryUpdate(points); }}
                 onFrameChange={handleFrameChange}
                 framerate={selectedVideo?.framerate ?? 30}
                 onFramerateChange={handleFramerateChange}
@@ -928,6 +942,8 @@ export default function App() {
             </div>
 
             {/* ── CENTER ── */}
+              </>
+            )}
             <main className="flex flex-1 min-w-0 min-h-0">
               {selectedVideo ? (
                 <VideoDisplay
@@ -972,6 +988,17 @@ export default function App() {
                     className="hidden"
                     onChange={(e) => { if (e.target.files?.length) { requestUpload(e.target.files); e.target.value = ''; } }}
                   />
+                  {!showSysIdSidePanels && (
+                    <ImportFolderButton
+                      label="Import Project"
+                      icon={FolderDown}
+                      className="hidden"
+                      actionRef={importProjectActionRef}
+                      unsupportedMessage="Import Project requires Chrome or Edge. Your browser does not support folder selection."
+                      onError={(message) => window.alert(message)}
+                      onFolderSelected={handleImportProjectFolder}
+                    />
+                  )}
                   <div className="flex flex-col items-center gap-3">
                     <button
                       type="button"
@@ -998,6 +1025,8 @@ export default function App() {
               )}
             </main>
 
+            {showSysIdSidePanels && (
+              <>
             {/* Right edge */}
             <div className="flex-shrink-0 flex flex-col relative">
               <button
@@ -1054,6 +1083,8 @@ export default function App() {
                 />
               )}
             </div>
+              </>
+            )}
           </>
         ) : (
           /* ── TRAJECTORY GENERATION TAB ── */
@@ -1103,8 +1134,12 @@ export default function App() {
               hoveredId={hoveredTrajId}
               showAll={showAllTrajGenTrajectories}
               onShowAllChange={handleShowAllTrajGenChange}
+              showAllOptimalTrajectories={showAllOptimalTrajectoriesTrajGen}
+              onShowAllOptimalTrajectoriesChange={handleShowAllOptimalTrajectoriesTrajGenChange}
               showOptimalTrajectories={showOptimalTrajectoriesTrajGen}
-              onShowOptimalTrajectoriesChange={handleShowOptimalTrajectoriesTrajGenChange}
+              onShowOptimalTrajectoriesChange={setShowOptimalTrajectoriesTrajGen}
+              showLowestSpeedTrajectories={showLowestSpeedTrajectoriesTrajGen}
+              onShowLowestSpeedTrajectoriesChange={setShowLowestSpeedTrajectoriesTrajGen}
               trajMoeById={trajMoeById}
               bestMoeTrajIds={bestMoeTrajIds}
               optimalLowArcTrajIds={visibleOptimalTrajPaths.lowArcIds}

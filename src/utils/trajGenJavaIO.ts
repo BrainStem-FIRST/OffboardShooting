@@ -1,74 +1,24 @@
 import type { TrajGenParams, TrajGroup } from '../types';
 import type { TrajectoryMoe } from '../simulation';
-import { resolveMagnusPower } from '../simulation';
-import { buildTrajGenProjectPayload } from './trajGenProjectIO';
-import { normalizeTrajGenParamsValue } from './trajGenSettingsIO';
+import { buildTrajGenProjectPayload, type TrajGenProjectFile } from './trajGenProjectIO';
 export const TRAJECTORY_JAVA_CLASS_NAME = 'TrajectoryJsonString';
 export const TRAJECTORY_JAVA_FILE_NAME = `${TRAJECTORY_JAVA_CLASS_NAME}.java`;
 
-export interface JavaTrajectoryEntry {
-  exitAngle: number;
-  speed: number;
-  tof: number;
-  speedMOE: number;
-  angleMOE: number;
-}
-
-export interface JavaTrajectoryGroup {
-  dx: number;
-  trajectories: JavaTrajectoryEntry[];
-}
-
-export interface JavaTrajectoryPayload {
-  dy: number;
-  dragCoeff: number;
-  magnusCoeff: number;
-  magnusPower: number;
-  groups: JavaTrajectoryGroup[];
-}
-
-/** Slim trajectory JSON for embedding in Java. */
+/** Same JSON payload as the regular trajectory project download, embedded in Java. */
 export function buildTrajectoryJavaJsonPayload(
   params: TrajGenParams,
   groups: TrajGroup[],
   trajMoeById?: Map<string, TrajectoryMoe>,
-): JavaTrajectoryPayload {
-  const normalizedParams = normalizeTrajGenParamsValue(params) ?? params;
-  const groupsWithTrajs = groups.filter((g) => g.trajectories.length > 0);
-  const exported = buildTrajGenProjectPayload(normalizedParams, groups, trajMoeById);
-  const firstGroup = groupsWithTrajs[0];
-
-  return {
-    dy: normalizedParams.dy,
-    dragCoeff: firstGroup?.drag ?? normalizedParams.dragCoefficient,
-    magnusCoeff: firstGroup?.magnus ?? normalizedParams.magnusGain,
-    magnusPower: resolveMagnusPower(firstGroup?.magnusPower ?? normalizedParams.magnusPower),
-    groups: exported.groups.map((group, index) => {
-      const record = group as Record<string, unknown>;
-      const sourceGroup = groupsWithTrajs[index];
-      const trajectories = Array.isArray(record.trajectories)
-        ? (record.trajectories as Record<string, number>[])
-        : [];
-      return {
-        dx: typeof record.dx === 'number' ? record.dx : sourceGroup.dx,
-        trajectories: trajectories.map((t) => ({
-          exitAngle: t.exitAngle,
-          speed: t.speed,
-          tof: t.timeOfFlight,
-          speedMOE: t.speedMoe ?? 0,
-          angleMOE: t.angleMoe ?? 0,
-        })),
-      };
-    }),
-  };
+): TrajGenProjectFile {
+  return buildTrajGenProjectPayload(params, groups, trajMoeById);
 }
+
 export function serializeTrajectoryJavaJson(
   params: TrajGenParams,
   groups: TrajGroup[],
   trajMoeById?: Map<string, TrajectoryMoe>,
 ): string {
-  const payload = buildTrajectoryJavaJsonPayload(params, groups, trajMoeById);
-  const json = JSON.stringify(payload);
+  const json = JSON.stringify(buildTrajectoryJavaJsonPayload(params, groups, trajMoeById));
   JSON.parse(json);
   return json;
 }

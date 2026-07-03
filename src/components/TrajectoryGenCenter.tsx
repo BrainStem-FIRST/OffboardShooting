@@ -15,8 +15,12 @@ interface Props {
   hoveredId: string | null;
   showAll: boolean;
   onShowAllChange: (showAll: boolean) => void;
+  showAllOptimalTrajectories: boolean;
+  onShowAllOptimalTrajectoriesChange: (show: boolean) => void;
   showOptimalTrajectories: boolean;
   onShowOptimalTrajectoriesChange: (show: boolean) => void;
+  showLowestSpeedTrajectories: boolean;
+  onShowLowestSpeedTrajectoriesChange: (show: boolean) => void;
   trajMoeById: Map<string, TrajectoryMoe>;
   bestMoeTrajIds: Set<string>;
   optimalLowArcTrajIds: Set<string>;
@@ -39,8 +43,12 @@ export default function TrajectoryGenCenter({
   hoveredId,
   showAll,
   onShowAllChange,
+  showAllOptimalTrajectories,
+  onShowAllOptimalTrajectoriesChange,
   showOptimalTrajectories,
   onShowOptimalTrajectoriesChange,
+  showLowestSpeedTrajectories,
+  onShowLowestSpeedTrajectoriesChange,
   trajMoeById,
   bestMoeTrajIds,
   optimalLowArcTrajIds,
@@ -78,12 +86,27 @@ export default function TrajectoryGenCenter({
                 labelClassName="text-sm text-gray-400"
               />
               <CheckboxLabel
+                checked={showAllOptimalTrajectories}
+                disabled={groups.length === 0}
+                onChange={onShowAllOptimalTrajectoriesChange}
+                label="Show all optimal"
+                labelClassName="text-sm text-gray-400"
+                color="green"
+              />
+              <CheckboxLabel
                 checked={showOptimalTrajectories}
                 disabled={groups.length === 0}
                 onChange={onShowOptimalTrajectoriesChange}
-                label="Show optimal trajectories"
+                label="Show optimal"
                 labelClassName="text-sm text-gray-400"
                 color="green"
+              />
+              <CheckboxLabel
+                checked={showLowestSpeedTrajectories}
+                disabled={groups.length === 0}
+                onChange={onShowLowestSpeedTrajectoriesChange}
+                label="Show lowest speed"
+                labelClassName="text-sm text-gray-400"
               />
             </div>
             <div className="flex-1 min-h-0 min-w-0 relative">
@@ -93,7 +116,9 @@ export default function TrajectoryGenCenter({
                 selectedGroupId={selectedGroupId}
                 hoveredId={hoveredId}
                 showAll={showAll}
+                showAllOptimalTrajectories={showAllOptimalTrajectories}
                 showOptimalTrajectories={showOptimalTrajectories}
+                showLowestSpeedTrajectories={showLowestSpeedTrajectories}
                 trajMoeById={trajMoeById}
                 bestMoeTrajIds={bestMoeTrajIds}
                 optimalLowArcTrajIds={optimalLowArcTrajIds}

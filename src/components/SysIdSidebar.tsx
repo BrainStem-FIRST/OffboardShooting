@@ -1,10 +1,10 @@
 import { useRef, useState, useEffect, useMemo } from 'react';
 import {
-  Upload, Film, Trash2, Crosshair, RotateCcw, Save, Trash, SkipForward, FolderDown, Download,
+  Upload, Film, Trash2, Crosshair, RotateCcw, Save, Trash, SkipForward, FolderDown,
 } from 'lucide-react';
 import { ImportFolderButton } from './ImportFolderButton';
 import { CheckboxLabel } from './Checkbox';
-import { VideoData, TrajectoryPoint, Meterstick, LaunchParams } from '../types';
+import { VideoData, Meterstick, LaunchParams } from '../types';
 import VideoOptionsDialog from './VideoOptionsDialog';
 import XdirUploadDialog from './XdirUploadDialog';
 import type { LoadedConfiguration } from '../utils/trajectorySegments';
@@ -17,7 +17,6 @@ import {
   countPlottedPoints,
 } from '../utils/trajectorySegments';
 import { downloadFrameTimingDebug, estimateFpsFromFrameCount } from '../utils/frameTiming';
-import { downloadExitEstimatesTxt } from '../utils/exitEstimateExport';
 import {
   configFileNameForVideo,
   exitVelocityFromVideoName,
@@ -35,6 +34,7 @@ import {
   panelHint, panelMeta, panelInput, panelInputNumeric, panelBtn, panelBtnPrimary, panelListItem,
   panelEmpty, panelMono,
 } from './panelStyles';
+import PanelResizeHandle from './PanelResizeHandle';
 
 type SidebarTab = 'uploadSave' | 'annotation';
 
@@ -47,7 +47,7 @@ function FramerateInput({ value, onChange }: { value: number; onChange: (v: numb
   }, [value, focused]);
 
   function commit(str: string) {
-    const stripped = str.replace(/[^0-9.\-]/g, '');
+    const stripped = str.replace(/[^0-9.-]/g, '');
     let n = parseFloat(stripped);
     if (isNaN(n) || n <= 0) n = value > 0 ? value : 30;
     setRaw(String(n));
@@ -172,7 +172,6 @@ interface Props {
   onShowTrajectoryPointsChange: (v: boolean) => void;
   focusedTrajectoryId: string | null;
   onFocusedTrajectoryChange: (id: string | null) => void;
-  onTrajectoryUpdate: (points: TrajectoryPoint[]) => void;
   onFrameChange: (frame: number) => void;
   framerate: number;
   onFramerateChange: (fps: number) => void;
@@ -217,7 +216,6 @@ export default function SysIdSidebar({
   onShowTrajectoryPointsChange,
   focusedTrajectoryId,
   onFocusedTrajectoryChange,
-  onTrajectoryUpdate,
   onFrameChange,
   framerate,
   onFramerateChange,
@@ -253,8 +251,12 @@ export default function SysIdSidebar({
   const [savingProject, setSavingProject] = useState(false);
   const [importing, setImporting] = useState(false);
   const [projectStatus, setProjectStatus] = useState<{ ok: boolean | null; text: string } | null>(null);
+  const [uploadSaveBottomHeight, setUploadSaveBottomHeight] = useState(260);
 
-  const segments = selectedVideo ? buildTrajectorySegments(selectedVideo.trajectory) : [];
+  const segments = useMemo(
+    () => (selectedVideo ? buildTrajectorySegments(selectedVideo.trajectory) : []),
+    [selectedVideo],
+  );
   const segmentAtCurrent = selectedVideo
     ? activeSegmentAtFrame(segments, selectedVideo.currentFrame)
     : null;
@@ -283,7 +285,7 @@ export default function SysIdSidebar({
         actualAngle: actual.exitAngle,
       };
     });
-  }, [segments, selectedVideo, meterstick.length, framerate, empiricalNumPoints, selectedVideo?.trajectoryLaunchParams, selectedVideo?.xdir, selectedVideo?.frameTimes]);
+  }, [segments, selectedVideo, meterstick.length, framerate, empiricalNumPoints]);
 
   const numPointsSliderMax = useMemo(() => {
     const longest = segments.reduce((m, s) => Math.max(m, countPlottedPoints(s.points)), 0);
@@ -302,7 +304,7 @@ export default function SysIdSidebar({
       empiricalNumPoints,
       selectedVideo?.frameTimes
     );
-  }, [editingSegment, selectedVideo, meterstick.length, framerate, empiricalNumPoints, selectedVideo?.frameTimes]);
+  }, [editingSegment, selectedVideo, meterstick.length, framerate, empiricalNumPoints]);
 
   function formatRadius(r: number | null): string {
     if (r === null) return '—';
@@ -382,21 +384,6 @@ export default function SysIdSidebar({
 
   const canApplyAllVelEstimates = segmentStats.some((s) => s.speed !== null);
   const canApplyAllAngleEstimates = segmentStats.some((s) => s.angle !== null);
-  const canExportEstimates = selectedVideo !== null && segmentStats.length > 0;
-
-  function handleExportEstimates() {
-    if (!selectedVideo || segmentStats.length === 0) return;
-    downloadExitEstimatesTxt(
-      selectedVideo.name,
-      framerate,
-      empiricalNumPoints,
-      segmentStats.map((seg) => ({
-        name: seg.name,
-        speed: seg.speed,
-        angle: seg.angle,
-      }))
-    );
-  }
 
   function handleUploadFiles(e: React.ChangeEvent<HTMLInputElement>) {
     if (e.target.files && e.target.files.length > 0) {
@@ -424,6 +411,20 @@ export default function SysIdSidebar({
     } finally {
       saveBusyRef.current = false;
       setSaving(false);
+    }
+  }
+
+  function handleSaveOneConfigClick(video: VideoData) {
+    if (saveBusyRef.current || saveProjectBusyRef.current || importBusyRef.current) return;
+    try {
+      const { fileNames } = downloadConfigFiles([video]);
+      setProjectStatus({
+        ok: true,
+        text: `Downloaded ${fileNames[0] ?? configFileNameForVideo(video.name)}.`,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setProjectStatus({ ok: false, text: `Could not save config: ${msg}` });
     }
   }
 
@@ -546,6 +547,10 @@ export default function SysIdSidebar({
     setVideoDialogId(id);
   }
 
+  const resizeUploadSaveBottom = (deltaY: number) => {
+    setUploadSaveBottomHeight((height) => Math.max(120, Math.min(520, height - deltaY)));
+  };
+
   return (
     <aside className={`${panelAside} border-r border-gray-700 flex flex-col`} style={{ width }}>
       {/* Tab bar */}
@@ -616,20 +621,38 @@ export default function SysIdSidebar({
                         : `${trajCount} trajectory${trajCount !== 1 ? 'ies' : ''} · ${pointCount} point${pointCount !== 1 ? 's' : ''}`}
                     </div>
                   </div>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); onDelete(v.id); }}
-                    className={`flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity rounded p-0.5 mt-0.5 ${
-                      v.id === selectedId ? 'hover:bg-blue-400' : 'hover:bg-gray-700'
-                    }`}
-                  >
-                    <Trash2 size={14} />
-                  </button>
+                  <div className="flex-shrink-0 flex flex-col gap-1 opacity-0 group-hover:opacity-100 transition-opacity mt-0.5">
+                    <button
+                      type="button"
+                      title="Delete video"
+                      onClick={(e) => { e.stopPropagation(); onDelete(v.id); }}
+                      className={`rounded p-0.5 ${
+                        v.id === selectedId ? 'hover:bg-blue-400' : 'hover:bg-gray-700'
+                      }`}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                    <button
+                      type="button"
+                      title="Download this video's config"
+                      onClick={(e) => { e.stopPropagation(); handleSaveOneConfigClick(v); }}
+                      className={`rounded p-0.5 ${
+                        v.id === selectedId ? 'hover:bg-blue-400' : 'hover:bg-gray-700'
+                      }`}
+                    >
+                      <Save size={14} />
+                    </button>
+                  </div>
                 </div>
               );
             })}
           </div>
 
-          <div className="flex-shrink-0 max-h-48 min-h-0 overflow-y-auto border-t border-gray-700 p-3 space-y-1.5">
+          <PanelResizeHandle onDrag={resizeUploadSaveBottom} />
+          <div
+            className="flex-shrink-0 min-h-0 overflow-y-auto border-t border-gray-700 p-3 space-y-1.5"
+            style={{ height: uploadSaveBottomHeight }}
+          >
             <button
               type="button"
               onClick={handleSaveConfigsClick}
@@ -993,18 +1016,6 @@ export default function SysIdSidebar({
             </>
           )}
         </div>
-        </div>
-        <div className="flex-shrink-0 border-t border-gray-700 p-3">
-          <button
-            type="button"
-            onClick={handleExportEstimates}
-            disabled={!canExportEstimates}
-            className={`w-full ${panelBtnPrimary} bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed py-1.5 text-sm`}
-            title="Download estimated exit velocity and angle for every trajectory in this video"
-          >
-            <Download size={14} />
-            Export exit estimates
-          </button>
         </div>
         </>
       )}

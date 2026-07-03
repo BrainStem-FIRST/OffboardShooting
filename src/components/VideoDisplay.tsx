@@ -356,7 +356,6 @@ export default function VideoDisplay({
     const ro = new ResizeObserver(() => syncCanvasToVideo());
     if (containerRef.current) ro.observe(containerRef.current);
     return () => ro.disconnect();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [duration]);
 
   function startPanDrag(clientX: number, clientY: number) {
@@ -511,7 +510,7 @@ export default function VideoDisplay({
       segmentInputRef.current.focus();
       segmentInputRef.current.select();
     }
-  }, [editingSegment?.index]);
+  }, [editingSegment]);
 
   function handleCanvasMouseDown(e: React.MouseEvent) {
     if (contextMenu) setContextMenu(null);
@@ -1006,6 +1005,9 @@ export default function VideoDisplay({
             <ChevronRight size={18} />
           </button>
         </div>
+        <span className="absolute bottom-3 left-4 text-xs text-gray-500 pointer-events-none">
+          <span className="text-white">●</span> = abnormal framerate
+        </span>
         <span className="absolute bottom-3 right-4 text-xs text-gray-500 font-mono tabular-nums pointer-events-none">
           {Math.round(zoom * 100)}%
         </span>

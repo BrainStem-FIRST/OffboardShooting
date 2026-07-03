@@ -5,7 +5,7 @@ import { Play, Loader, RefreshCw } from 'lucide-react';
 import { CheckboxLabel } from './Checkbox';
 import {
   panelAside, panelContent, panelSectionTitle, panelSubsectionTitle, panelLabel,
-  panelLabelInline, panelInput, panelBody, panelHint, panelBtnPrimary, panelMeta,
+  panelLabelInline, panelInput, panelHint, panelBtnPrimary, panelMeta,
 } from './panelStyles';
 import { ProgressBar } from './ProgressBar';
 
@@ -45,7 +45,7 @@ function RangeInput({ label, value, step, min, max, onCommit }: {
   }, [value, focused]);
 
   function commit(str: string) {
-    const stripped = str.replace(/[^0-9.\-]/g, '');
+    const stripped = str.replace(/[^0-9.-]/g, '');
     let n = parseFloat(stripped);
     if (isNaN(n)) n = min;
     n = Math.max(min, Math.min(max, n));
@@ -59,6 +59,7 @@ function RangeInput({ label, value, step, min, max, onCommit }: {
       <input
         type="text"
         inputMode="decimal"
+        step={step}
         value={raw}
         onChange={(e) => setRaw(e.target.value)}
         onFocus={() => setFocused(true)}
@@ -178,7 +179,7 @@ function NumInput({ label, unit, value, step, min, max, onChange }: {
   }, [value, focused]);
 
   function commit(str: string) {
-    const stripped = str.replace(/[^0-9.\-]/g, '');
+    const stripped = str.replace(/[^0-9.-]/g, '');
     let n = parseFloat(stripped);
     if (isNaN(n)) n = min ?? 0;
     if (min !== undefined) n = Math.max(min, n);

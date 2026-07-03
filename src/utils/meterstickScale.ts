@@ -190,7 +190,8 @@ export class MeterstickScale {
     return right.pixelsPerMeter;
   }
 
-  yAtX(_x: number): number | null {
+  yAtX(x: number): number | null {
+    void x;
     if (this.points.length < 2) return null;
     return this.points[0].y;
   }

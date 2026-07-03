@@ -1,5 +1,5 @@
 import { TrajectoryPoint, LaunchParams, Meterstick, MeterstickPoint, VideoData, XDir } from '../types';
-import { defaultMeterstickPoints, horizontalizeMeterstickPoints, meterstickFromPoints, normalizeSegmentMeters } from './meterstickScale';
+import { defaultMeterstickPoints, defaultSegmentMeters, horizontalizeMeterstickPoints, meterstickFromPoints, normalizeSegmentMeters } from './meterstickScale';
 import { elapsedSeconds } from './frameTiming';
 
 export const DEFAULT_LAUNCH_PARAMS: LaunchParams = {

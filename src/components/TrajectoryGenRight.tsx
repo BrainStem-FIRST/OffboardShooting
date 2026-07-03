@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { GeneratedTrajectory, TrajGroup, TrajGenParams } from '../types';
 import { Trash2, Download, Upload, RefreshCw, Copy, ChevronUp, ChevronDown, XCircle, X, Save } from 'lucide-react';
 import {
@@ -12,6 +12,7 @@ import {
 import { ProgressBar } from './ProgressBar';
 import { CheckboxLabel } from './Checkbox';
 import { isUnsuccessfulTrajectory } from '../utils/trajGenStatus';
+import PanelResizeHandle from './PanelResizeHandle';
 import {
   downloadTrajGenProject,
   parseTrajGenImport,
@@ -81,7 +82,7 @@ function ErrorToleranceInput({
   }, [goalAngleValue, angleFocused]);
 
   function commitTolerance(str: string) {
-    const stripped = str.replace(/[^0-9.\-]/g, '');
+    const stripped = str.replace(/[^0-9.-]/g, '');
     let n = parseFloat(stripped);
     if (isNaN(n)) n = 0.05;
     n = Math.max(0.05, n);
@@ -91,7 +92,7 @@ function ErrorToleranceInput({
   }
 
   function commitAngle(str: string) {
-    const stripped = str.replace(/[^0-9.\-]/g, '');
+    const stripped = str.replace(/[^0-9.-]/g, '');
     let n = parseFloat(stripped);
     if (isNaN(n)) n = 0;
     n = Math.max(-89, Math.min(89, n));
@@ -185,7 +186,7 @@ export default function TrajectoryGenRight({
   params, onParamsChange, onRecalculateMoe, moeRecalculating, moeRecalcProgress, width
 }: Props) {
   const group = groups.find(g => g.id === selectedGroupId) ?? groups[0] ?? null;
-  const trajectories = group?.trajectories ?? [];
+  const trajectories = useMemo(() => group?.trajectories ?? [], [group]);
   const drag = group?.drag ?? params.dragCoefficient;
   const magnus = group?.magnus ?? params.magnusGain;
   const magnusPower = resolveMagnusPower(group?.magnusPower ?? params.magnusPower);
@@ -205,6 +206,7 @@ export default function TrajectoryGenRight({
   const [importing, setImporting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [importStatus, setImportStatus] = useState<{ ok: boolean | null; text: string } | null>(null);
+  const [bottomPanelHeight, setBottomPanelHeight] = useState(260);
 
   useEffect(() => { activeCellRef.current = activeCell; }, [activeCell]);
   useEffect(() => { cellRawRef.current = cellRaw; }, [cellRaw]);
@@ -213,7 +215,7 @@ export default function TrajectoryGenRight({
     if (activeCell) {
       setTimeout(() => { cellRef.current?.focus(); cellRef.current?.select(); }, 0);
     }
-  }, [activeCell?.id, activeCell?.field]);
+  }, [activeCell]);
 
   const hoveredTrajIdRef = useRef(hoveredTrajId);
   const trajectoriesRef = useRef(trajectories);
@@ -228,11 +230,11 @@ export default function TrajectoryGenRight({
   useEffect(() => { dragRef.current = drag; }, [drag]);
   useEffect(() => { magnusRef.current = magnus; }, [magnus]);
 
-  function applyRefineResult(
+  const applyRefineResult = useCallback((
     result: ReturnType<typeof refineTrajectory>,
     dx: number,
     dy: number,
-  ): GeneratedTrajectory {
+  ): GeneratedTrajectory => {
     const t = result.trajectory;
     const impact = simulateImpactAngle(t.exitVelocity, t.exitAngle, dragRef.current, magnusRef.current, dx, magnusPower);
     const withImpact = { ...t, impactAngle: impact !== null ? Math.round(impact * 100) / 100 : t.impactAngle };
@@ -240,7 +242,7 @@ export default function TrajectoryGenRight({
     const landing = simulateLanding(t.exitVelocity, t.exitAngle, dragRef.current, magnusRef.current, dy, magnusPower);
     const inGoal = landing !== null && Math.abs(landing.landingX - dx) <= RAW_TRAJECTORY_ERROR_TOLERANCE / 2;
     return { ...withImpact, successfulBracket: inGoal, accurate: result.accurate && inGoal };
-  }
+  }, [magnusPower]);
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -275,7 +277,7 @@ export default function TrajectoryGenRight({
     }
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [onUpdateGroup]);
+  }, [onUpdateGroup, applyRefineResult]);
 
   function handleSort(key: SortKey) {
     if (sortKey === key) setSortAsc(v => !v);
@@ -294,7 +296,7 @@ export default function TrajectoryGenRight({
     committingRef.current = true;
     setActiveCell(null);
     const raw = cellRawRef.current;
-    const n = parseFloat(raw.replace(/[^0-9.\-]/g, ''));
+    const n = parseFloat(raw.replace(/[^0-9.-]/g, ''));
     if (!isNaN(n)) {
       onUpdateGroup(group.id, trajectories.map(t => {
         if (t.id !== cell.id) return t;
@@ -509,6 +511,9 @@ export default function TrajectoryGenRight({
     (sum, g) => sum + g.trajectories.filter(isUnsuccessfulTrajectory).length,
     0
   );
+  const resizeBottomPanel = (deltaY: number) => {
+    setBottomPanelHeight((height) => Math.max(140, Math.min(520, height - deltaY)));
+  };
 
   return (
     <aside className={`${panelAside} border-l border-gray-700`} style={{ width }}>
@@ -764,8 +769,12 @@ export default function TrajectoryGenRight({
         </div>
       )}
 
-      {/* Bottom utilities — capped height, scroll when content overflows */}
-      <div className="flex-shrink-0 max-h-48 min-h-0 overflow-y-auto p-3 space-y-3 border-t border-gray-700">
+      {/* Bottom utilities */}
+      <PanelResizeHandle onDrag={resizeBottomPanel} />
+      <div
+        className="flex-shrink-0 min-h-0 overflow-y-auto p-3 space-y-3 border-t border-gray-700"
+        style={{ height: bottomPanelHeight }}
+      >
             <div className="space-y-2">
               <h3 className={panelSectionTitle}>Optimal trajectory</h3>
               <ErrorToleranceInput

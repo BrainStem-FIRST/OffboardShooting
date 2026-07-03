@@ -1,23 +1,36 @@
 import type { TrajGenParams, TrajGroup, TrajOptimizerParams } from '../types';
 import {
-  groupExportPayload,
-  pickOptimalTrajectoryPaths,
-  optimalPickWeightsFromParams,
+  projectGroupExportPayload,
+  pickOptimalExportPaths,
+  resolveGroupOptimalExportIndexes,
   resolveMagnusPower,
   trajOptimizerParamsFromGenParams,
   type TrajectoryMoe,
 } from '../simulation';
 import { normalizeTrajGenParamsValue, parseTrajGenParamsValue, parseTrajGenSettings } from './trajGenSettingsIO';
-import { parseTrajGroupJson, parseOptimizerParams } from './trajGenIO';
+import { parseTrajGroupJson, parseTrajGenProjectGroupJson, parseOptimizerParams } from './trajGenIO';
 
 export const TRAJ_GEN_PROJECT_KIND = 'trajGenProject';
+
+/** Website-only generation settings (excludes robot-facing physics coeffs at project root). */
+export type TrajGenProjectParams = Omit<TrajGenParams, 'dy' | 'dragCoefficient' | 'magnusGain' | 'magnusPower'>;
+
+export interface TrajGenProjectGroupExport {
+  dx: number;
+  optimalLowArcTrajectoryIndex?: number;
+  optimalHighArcTrajectoryIndex?: number;
+  trajectories: Record<string, number>[];
+}
 
 export interface TrajGenProjectFile {
   version: 1;
   kind: typeof TRAJ_GEN_PROJECT_KIND;
-  params: TrajGenParams;
-  optimizerParams: TrajOptimizerParams;
-  groups: Record<string, unknown>[];
+  projectParams: TrajGenProjectParams;
+  dy: number;
+  dragCoeff: number;
+  magnusCoeff: number;
+  magnusPower: number;
+  groups: TrajGenProjectGroupExport[];
 }
 
 export type TrajGenImportResult =
@@ -46,12 +59,65 @@ function mergeOptimizerIntoParams(
 }
 
 function sanitizeFileName(name: string): string {
-  return name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
+  return name
+    .replace(/[<>:"/\\|?*]/g, '_')
+    .split('')
+    .map((char) => (char.charCodeAt(0) < 32 ? '_' : char))
+    .join('');
+}
+
+function roundExportNumber(value: number): number {
+  if (!Number.isFinite(value)) return value;
+  const rounded = Math.round((value + Number.EPSILON) * 100000) / 100000;
+  return Object.is(rounded, -0) ? 0 : rounded;
+}
+
+function roundJsonNumbers<T>(value: T): T {
+  if (typeof value === 'number') return roundExportNumber(value) as T;
+  if (Array.isArray(value)) return value.map((item) => roundJsonNumbers(item)) as T;
+  if (value && typeof value === 'object') {
+    const rounded: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) {
+      rounded[key] = roundJsonNumbers(item);
+    }
+    return rounded as T;
+  }
+  return value;
 }
 
 export function trajGenProjectFileName(params: TrajGenParams): string {
   const { dxMin, dxMax, dy } = params;
   return sanitizeFileName(`trajgen(${dxMin}, ${dy})_to_(${dxMax}, ${dy}).json`);
+}
+
+function buildProjectParams(params: TrajGenParams): TrajGenProjectParams {
+  const projectParams: Partial<TrajGenParams> = { ...params };
+  delete projectParams.dy;
+  delete projectParams.dragCoefficient;
+  delete projectParams.magnusGain;
+  delete projectParams.magnusPower;
+  return projectParams as TrajGenProjectParams;
+}
+
+function parseTrajGenProjectParams(record: Record<string, unknown>): TrajGenParams | null {
+  const projectParamsRaw = record.projectParams;
+  if (!projectParamsRaw || typeof projectParamsRaw !== 'object') return null;
+
+  const dy = typeof record.dy === 'number' ? record.dy : null;
+  const dragCoeff = typeof record.dragCoeff === 'number' ? record.dragCoeff : null;
+  const magnusCoeff = typeof record.magnusCoeff === 'number' ? record.magnusCoeff : null;
+  const magnusPower = typeof record.magnusPower === 'number' ? record.magnusPower : null;
+  if (dy === null || dragCoeff === null || magnusCoeff === null || magnusPower === null) {
+    return null;
+  }
+
+  return parseTrajGenParamsValue({
+    ...(projectParamsRaw as Record<string, unknown>),
+    dy,
+    dragCoefficient: dragCoeff,
+    magnusGain: magnusCoeff,
+    magnusPower,
+  });
 }
 
 export function buildTrajGenProjectPayload(
@@ -60,38 +126,32 @@ export function buildTrajGenProjectPayload(
   trajMoeById?: Map<string, TrajectoryMoe>,
 ): TrajGenProjectFile {
   const normalizedParams = normalizeTrajGenParamsValue(params) ?? params;
-  const optimizerParams = trajOptimizerParamsFromGenParams(normalizedParams);
   const groupsWithTrajs = groups.filter((g) => g.trajectories.length > 0);
-  const optimalPaths =
-    trajMoeById && trajMoeById.size > 0
-      ? pickOptimalTrajectoryPaths(groupsWithTrajs, trajMoeById, optimalPickWeightsFromParams(normalizedParams))
-      : { lowArcIds: new Set<string>(), highArcIds: new Set<string>(), allIds: new Set<string>() };
+  const optimalPaths = pickOptimalExportPaths(groupsWithTrajs, normalizedParams, trajMoeById);
 
   const magnusPower = resolveMagnusPower(normalizedParams.magnusPower);
   const exportedGroups = groupsWithTrajs.map((g) => {
-    const computedLowArcIndex = g.trajectories.findIndex((t) => optimalPaths.lowArcIds.has(t.id));
-    const computedHighArcIndex = g.trajectories.findIndex((t) => optimalPaths.highArcIds.has(t.id));
-    const optimalLowArcIndex =
-      g.optimalLowArcTrajectoryIndex !== undefined ? g.optimalLowArcTrajectoryIndex : computedLowArcIndex;
-    const optimalHighArcIndex =
-      g.optimalHighArcTrajectoryIndex !== undefined ? g.optimalHighArcTrajectoryIndex : computedHighArcIndex;
-    return groupExportPayload(
+    const { optimalLowArcIndex, optimalHighArcIndex } = resolveGroupOptimalExportIndexes(g, optimalPaths);
+    return projectGroupExportPayload(
       g,
       normalizedParams.errorTolerance,
       magnusPower,
       normalizedParams.goalPlaneAngleDeg,
-      optimalLowArcIndex >= 0 ? optimalLowArcIndex : undefined,
-      optimalHighArcIndex >= 0 ? optimalHighArcIndex : undefined,
+      optimalLowArcIndex,
+      optimalHighArcIndex,
     );
   });
 
-  return {
+  return roundJsonNumbers({
     version: 1,
     kind: TRAJ_GEN_PROJECT_KIND,
-    params: normalizedParams,
-    optimizerParams,
+    projectParams: buildProjectParams(normalizedParams),
+    dy: normalizedParams.dy,
+    dragCoeff: normalizedParams.dragCoefficient,
+    magnusCoeff: normalizedParams.magnusGain,
+    magnusPower,
     groups: exportedGroups,
-  };
+  });
 }
 
 export function serializeTrajGenProject(
@@ -128,6 +188,42 @@ export function parseTrajGenImport(text: string): TrajGenImportResult {
   const record = json as Record<string, unknown>;
 
   if (record.kind === TRAJ_GEN_PROJECT_KIND) {
+    const newFormatParams = parseTrajGenProjectParams(record);
+    if (newFormatParams) {
+      if (!Array.isArray(record.groups)) {
+        return { ok: false, message: 'Project file is missing trajectory groups.' };
+      }
+
+      const batchId = Date.now();
+      const physics = {
+        dy: newFormatParams.dy,
+        dragCoeff: newFormatParams.dragCoefficient,
+        magnusCoeff: newFormatParams.magnusGain,
+      };
+      const groups: TrajGroup[] = [];
+      const warnings: string[] = [];
+      for (let i = 0; i < record.groups.length; i++) {
+        const group = parseTrajGenProjectGroupJson(record.groups[i], physics, batchId);
+        if (!group) {
+          warnings.push(`Skipped group ${i + 1}: invalid trajectory data.`);
+          continue;
+        }
+        groups.push(group);
+      }
+
+      groups.sort((a, b) => a.dx - b.dx || a.dy - b.dy);
+      const optimizerParams = trajOptimizerParamsFromGenParams(newFormatParams);
+
+      return {
+        ok: true,
+        type: 'project',
+        params: newFormatParams,
+        groups: assignImportIds(groups, batchId),
+        optimizerParams,
+        warnings,
+      };
+    }
+
     const params = parseTrajGenParamsValue(record.params);
     if (!params) {
       return { ok: false, message: 'Project file is missing valid generation parameters.' };

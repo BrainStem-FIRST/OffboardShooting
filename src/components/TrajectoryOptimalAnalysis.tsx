@@ -4,6 +4,7 @@ import { TrajGenParams, TrajGroup } from '../types';
 import {
   buildOptimalSequencePoints,
   computeSequenceDerivatives,
+  isTrajectoryInArc,
   velocityBufferForTrajectory,
   type TrajectoryMoe,
 } from '../simulation';
@@ -53,26 +54,8 @@ function buildMoePoints(
   return points.sort((a, b) => a.dx - b.dx);
 }
 
-function lowestSpeedBoundaryAngle(group: TrajGroup): number | null {
-  let best = group.trajectories[0] ?? null;
-  for (const traj of group.trajectories) {
-    if (
-      !best ||
-      traj.exitVelocity < best.exitVelocity - 1e-12 ||
-      (Math.abs(traj.exitVelocity - best.exitVelocity) <= 1e-12 && traj.exitAngle < best.exitAngle)
-    ) {
-      best = traj;
-    }
-  }
-  return best?.exitAngle ?? null;
-}
-
 function arcTrajectories(group: TrajGroup, arc: ArcShowMode) {
-  const boundary = lowestSpeedBoundaryAngle(group);
-  if (boundary === null) return [];
-  return group.trajectories.filter((traj) =>
-    arc === 'low' ? traj.exitAngle <= boundary + 1e-12 : traj.exitAngle >= boundary - 1e-12,
-  );
+  return group.trajectories.filter((traj) => isTrajectoryInArc(group, traj, arc));
 }
 
 function buildFunctionRangeBars(groups: TrajGroup[], arc: ArcShowMode): DualAxisRangeBar[] {
