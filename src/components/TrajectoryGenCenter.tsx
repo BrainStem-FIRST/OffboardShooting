@@ -108,6 +108,13 @@ export default function TrajectoryGenCenter({
                 label="Show lowest speed"
                 labelClassName="text-sm text-gray-400"
               />
+              <CheckboxLabel
+                checked={params.showGoalPlanes}
+                disabled={groups.length === 0}
+                onChange={(checked) => onParamsChange({ ...params, showGoalPlanes: checked })}
+                label="Show goal planes"
+                labelClassName="text-sm text-gray-400"
+              />
             </div>
             <div className="flex-1 min-h-0 min-w-0 relative">
               <TrajectoryGenCanvas

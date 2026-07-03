@@ -10,7 +10,6 @@ import {
   panelEmpty, panelHint, panelMeta, panelMono, panelSubsectionTitle, panelInput,
 } from './panelStyles';
 import { ProgressBar } from './ProgressBar';
-import { CheckboxLabel } from './Checkbox';
 import { isUnsuccessfulTrajectory } from '../utils/trajGenStatus';
 import PanelResizeHandle from './PanelResizeHandle';
 import {
@@ -48,10 +47,8 @@ interface Props {
 function ErrorToleranceInput({
   toleranceValue,
   goalAngleValue,
-  showGoalPlanes,
   onToleranceChange,
   onGoalAngleChange,
-  onShowGoalPlanesChange,
   onRecalculate,
   recalcDisabled,
   recalculating,
@@ -59,10 +56,8 @@ function ErrorToleranceInput({
 }: {
   toleranceValue: number;
   goalAngleValue: number;
-  showGoalPlanes: boolean;
   onToleranceChange: (v: number) => void;
   onGoalAngleChange: (v: number) => void;
-  onShowGoalPlanesChange: (checked: boolean) => void;
   onRecalculate: (tolerance: number, goalAngle: number) => void;
   recalcDisabled: boolean;
   recalculating: boolean;
@@ -155,12 +150,6 @@ function ErrorToleranceInput({
       >
         {recalculating ? 'Recalculating…' : 'Recalculate'}
       </button>
-      <CheckboxLabel
-        checked={showGoalPlanes}
-        onChange={onShowGoalPlanesChange}
-        label="Show goal planes"
-        labelClassName="text-sm text-gray-400"
-      />
       {recalculating && (
         <ProgressBar
           className="pt-1"
@@ -780,10 +769,8 @@ export default function TrajectoryGenRight({
               <ErrorToleranceInput
                 toleranceValue={params.errorTolerance}
                 goalAngleValue={params.goalPlaneAngleDeg}
-                showGoalPlanes={params.showGoalPlanes}
                 onToleranceChange={(v) => onParamsChange({ ...params, errorTolerance: v })}
                 onGoalAngleChange={(v) => onParamsChange({ ...params, goalPlaneAngleDeg: v })}
-                onShowGoalPlanesChange={(checked) => onParamsChange({ ...params, showGoalPlanes: checked })}
                 onRecalculate={onRecalculateMoe}
                 recalcDisabled={groups.length === 0}
                 recalculating={moeRecalculating}
